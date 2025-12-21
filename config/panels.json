@@ -1,0 +1,10 @@
+{
+  "INTS": {
+    "login_url": "http://139.99.63.204/ints/login",
+    "sms_endpoint": "http://139.99.63.204/ints/portal/sms/received/getsms",
+    "user_field": "username",
+    "pass_field": "password",
+    "user": "Yuvraj2008",
+    "pass": "Yuvraj2008"
+  }
+}
