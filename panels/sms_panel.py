@@ -1,6 +1,6 @@
-import httpx
+from core.login_manager import get_session
 
-async def fetch_sms(panel):
-    async with httpx.AsyncClient() as c:
-        r = await c.get(panel["sms_api"], timeout=20)
-        return r.text
+async def fetch_sms(panel_id, panel):
+    session = await get_session(panel_id, panel)
+    r = await session.get(panel["sms_api"])
+    return r.text
