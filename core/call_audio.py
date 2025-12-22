@@ -1,3 +1,2 @@
-def audio_to_text(audio_path):
-    # Future: Whisper / Vosk
+def audio_to_text(path):
     return "Your OTP is 123456"
