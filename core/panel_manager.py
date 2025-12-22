@@ -5,22 +5,25 @@ PANELS_FILE = "config/panels.json"
 def load_panels():
     if not os.path.exists(PANELS_FILE):
         return {}
-    return json.load(open(PANELS_FILE))
+    with open(PANELS_FILE) as f:
+        return json.load(f)
 
-def save_panels(data):
-    json.dump(data, open(PANELS_FILE, "w"), indent=2)
+def save_panels(panels):
+    with open(PANELS_FILE, "w") as f:
+        json.dump(panels, f, indent=2)
 
-def create_panel(data):
+def create_panel(panel_data):
     panels = load_panels()
-    panel_id = "PANEL_" + uuid.uuid4().hex[:6].upper()
-    panels[panel_id] = data
+    pid = "PANEL_" + uuid.uuid4().hex[:6].upper()
+    panel_data["enabled"] = True
+    panels[pid] = panel_data
     save_panels(panels)
-    return panel_id
+    return pid
 
-def remove_panel(panel_id):
+def remove_panel(pid):
     panels = load_panels()
-    if panel_id in panels:
-        del panels[panel_id]
+    if pid in panels:
+        del panels[pid]
         save_panels(panels)
         return True
     return False
