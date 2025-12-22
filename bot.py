@@ -1,104 +1,104 @@
-import asyncio, os, json
-from telegram.ext import Application, CommandHandler
-from aiohttp import web
-import httpx
-
-from core.parser import parse_text
-from core.storage import is_seen, mark_seen
-from panels.ints_sms import IntsSMSPanel
+import os, json
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+from core.panel_manager import create_panel, remove_panel, load_panels
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
-PORT = int(os.getenv("PORT", 8080))
 
-PANELS_FILE = "config/panels.json"
-ENABLED_PANELS_FILE = "config/enabled_panels.json"
-CHATS_FILE = "config/chat_ids.json"
+user_states = {}
 
-# ---------- KEEP ALIVE ----------
-async def health(request):
-    return web.Response(text="OK")
+def is_admin(uid): 
+    return uid == ADMIN_ID
 
-async def run_web():
-    app = web.Application()
-    app.router.add_get("/", health)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
+async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🤖 OTP Panel Bot Active")
 
-async def keep_alive():
-    while True:
-        print("✅ Bot alive")
-        await asyncio.sleep(300)
+# ---------- ADD PANEL (MODERN FLOW) ----------
+async def addpanel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id): return
+    user_states[update.effective_user.id] = {"step": "mode"}
+    await update.message.reply_text(
+        "🧩 New Panel Setup\n\n"
+        "Select OTP Mode:\n"
+        "1️⃣ SMS Only\n"
+        "2️⃣ Call Only\n"
+        "3️⃣ SMS + Call"
+    )
 
-# ---------- HELP ----------
-def load_json(path, default):
-    if not os.path.exists(path):
-        with open(path, "w") as f:
-            json.dump(default, f)
-        return default
-    return json.load(open(path))
+async def panel_flow(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if uid not in user_states: return
 
-# ---------- POLLING ----------
-async def poll_panels(app):
-    while True:
-        try:
-            panels = load_json(PANELS_FILE, {})
-            enabled = load_json(ENABLED_PANELS_FILE, [])
-            chats = load_json(CHATS_FILE, [])
+    state = user_states[uid]
+    txt = update.message.text.strip()
 
-            for pname in enabled:
-                cfg = panels.get(pname)
-                if not cfg:
-                    continue
+    if state["step"] == "mode":
+        state["mode"] = {"1":"sms","2":"call","3":"sms_call"}.get(txt)
+        state["step"] = "login"
+        await update.message.reply_text(
+            "🔐 Login Type:\n1️⃣ Username + Password\n2️⃣ Email + Password"
+        )
 
-                async with httpx.AsyncClient(timeout=30) as client:
-                    panel = IntsSMSPanel(cfg)
-                    await panel.login(client)
-                    messages = await panel.fetch_items(client)
+    elif state["step"] == "login":
+        state["login"] = "userpass" if txt=="1" else "emailpass"
+        state["step"] = "name"
+        await update.message.reply_text("📛 Enter Panel Name:")
 
-                    for text in messages:
-                        if is_seen(text):
-                            continue
+    elif state["step"] == "name":
+        state["name"] = txt
+        state["step"] = "base"
+        await update.message.reply_text("🌐 Enter Base URL:")
 
-                        data = parse_text(text)
-                        msg = (
-                            "🔔 *New OTP*\n\n"
-                            f"{data['emoji']} *Service:* {data['service']}\n"
-                            f"📞 *Number:* `{data['phone']}`\n"
-                            f"🌍 *Country:* {data['country']} {data['flag']}\n"
-                            f"🔑 *OTP:* `{data['otp']}`\n\n"
-                            f"```{data['text']}```"
-                        )
+    elif state["step"] == "base":
+        state["base"] = txt
+        state["step"] = "sms_api" if state["mode"]!="call" else "call_api"
+        await update.message.reply_text(
+            "📩 Enter SMS API:" if state["mode"]!="call" else "📞 Enter Call API:"
+        )
 
-                        for cid in chats:
-                            await app.bot.send_message(cid, msg, parse_mode="Markdown")
+    elif state["step"] == "sms_api":
+        state["sms_api"] = txt
+        if state["mode"]=="sms_call":
+            state["step"] = "call_api"
+            await update.message.reply_text("📞 Enter Call API:")
+        else:
+            pid = create_panel(state)
+            del user_states[uid]
+            await update.message.reply_text(f"✅ Panel Added\nID: {pid}")
 
-                        mark_seen(text)
+    elif state["step"] == "call_api":
+        state["call_api"] = txt
+        pid = create_panel(state)
+        del user_states[uid]
+        await update.message.reply_text(f"✅ Panel Added\nID: {pid}")
 
-            await asyncio.sleep(5)
-        except Exception as e:
-            print("Error:", e)
-            await asyncio.sleep(10)
+# ---------- REMOVE PANEL ----------
+async def removepanel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id): return
+    if not ctx.args:
+        await update.message.reply_text("Usage: /removepanel PANEL_ID")
+        return
+    ok = remove_panel(ctx.args[0])
+    await update.message.reply_text("✅ Removed" if ok else "❌ Not Found")
 
-# ---------- TELEGRAM ----------
-async def start(update, context):
-    if update.effective_user.id == ADMIN_ID:
-        await update.message.reply_text("🤖 OTP Bot is LIVE")
+# ---------- LIST PANELS ----------
+async def panels(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    p = load_panels()
+    if not p:
+        await update.message.reply_text("No panels")
+        return
+    msg = "🧩 Panels:\n\n"
+    for k,v in p.items():
+        msg += f"{k} | {v['name']} | {v['mode']}\n"
+    await update.message.reply_text(msg)
 
-async def main():
-    app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
+# ---------- RUN ----------
+app = ApplicationBuilder().token(BOT_TOKEN).build()
+app.add_handler(CommandHandler("start", start))
+app.add_handler(CommandHandler("addpanel", addpanel))
+app.add_handler(CommandHandler("removepanel", removepanel))
+app.add_handler(CommandHandler("panels", panels))
+app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, panel_flow))
 
-    asyncio.create_task(run_web())
-    asyncio.create_task(keep_alive())
-    asyncio.create_task(poll_panels(app))
-
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling()
-    await asyncio.Event().wait()
-
-if __name__ == "__main__":
-    asyncio.run(main())
+app.run_polling()
