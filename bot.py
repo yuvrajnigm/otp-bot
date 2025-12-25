@@ -38,7 +38,7 @@ APIS = [
     },
     {
         "id": "Source 2",
-        "url": "http://185.2.83.39/crapi/dgroup/viewstats",
+        "url": "http://51.77.216.195/crapi/dgroup/viewstats",
         "token": API_TOKEN_2
     }
 ]
