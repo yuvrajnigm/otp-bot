@@ -1,6 +1,5 @@
-python-telegram-bot==20.7
+python-telegram-bot
 aiohttp
-httpx
-beautifulsoup4
-lxml
+flask
 phonenumbers
+pycountry
