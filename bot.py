@@ -1,104 +1,182 @@
-import os, json
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
-from core.panel_manager import create_panel, remove_panel, load_panels
+import os, re, json, asyncio, aiohttp, logging, threading
+from flask import Flask
+from telegram import Bot, Update
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+import phonenumbers, pycountry
 
+# ================= BASIC CONFIG =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHAT_ID = int(os.getenv("CHAT_ID"))
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 
-user_states = {}
+API_TOKEN_1 = os.getenv("API_TOKEN_1")
+API_TOKEN_2 = os.getenv("API_TOKEN_2")
 
-def is_admin(uid): 
-    return uid == ADMIN_ID
+if not all([BOT_TOKEN, API_TOKEN_1, API_TOKEN_2]):
+    raise RuntimeError("Missing ENV variables")
 
-async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🤖 OTP Panel Bot Active")
+FETCH_INTERVAL = 10
+RECORD_LIMIT = 5
 
-# ---------- ADD PANEL (MODERN FLOW) ----------
-async def addpanel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id): return
-    user_states[update.effective_user.id] = {"step": "mode"}
+CACHE_FILE = "sent_cache.json"
+SOURCE_STATE_FILE = "source_state.json"
+
+# ================= APIS =================
+APIS = [
+    {
+        "id": "Source 1",
+        "url": "http://147.135.212.197/crapi/had/viewstats",
+        "token": API_TOKEN_1
+    },
+    {
+        "id": "Source 2",
+        "url": "http://185.2.83.39/crapi/dgroup/viewstats",
+        "token": API_TOKEN_2
+    }
+]
+
+# ================= LOGGING =================
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("OTP-BOT")
+
+bot = Bot(token=BOT_TOKEN)
+
+# ================= KEEP ALIVE =================
+app = Flask(__name__)
+@app.route("/")
+def home(): return "Bot alive"
+
+threading.Thread(
+    target=lambda: app.run(host="0.0.0.0", port=8080),
+    daemon=True
+).start()
+
+# ================= HELPERS =================
+def load_json(file, default):
+    if os.path.exists(file):
+        with open(file) as f: return json.load(f)
+    return default
+
+def save_json(file, data):
+    with open(file, "w") as f: json.dump(data, f)
+
+def is_otp(msg):
+    return any(x in msg.lower() for x in ["otp", "code", "verification", "one time"])
+
+def extract_phone(text):
+    m = re.search(r"\+?\d{10,15}", text)
+    return m.group() if m else None
+
+def detect_country(phone):
+    try:
+        num = phonenumbers.parse(phone, None)
+        reg = phonenumbers.region_code_for_number(num)
+        country = pycountry.countries.get(alpha_2=reg)
+        flag = "".join(chr(127397 + ord(c)) for c in reg)
+        return flag, country.name if country else "Unknown"
+    except:
+        return "🏳️", "Unknown"
+
+# ================= API FETCH =================
+async def fetch_api(session, api):
+    async with session.get(
+        api["url"],
+        params={"token": api["token"], "records": RECORD_LIMIT},
+        timeout=20
+    ) as r:
+        return api["id"], await r.json()
+
+# ================= OTP LOOP =================
+async def otp_loop():
+    sent = set(load_json(CACHE_FILE, []))
+    state = load_json(SOURCE_STATE_FILE, {"Source 1": True, "Source 2": True})
+
+    async with aiohttp.ClientSession() as session:
+        while True:
+            try:
+                rows = []
+
+                for api in APIS:
+                    if not state.get(api["id"], True):
+                        continue
+
+                    src, data = await fetch_api(session, api)
+
+                    if data.get("status") == "success":
+                        for r in data.get("data", []):
+                            r["_src"] = src
+                            rows.append(r)
+
+                if not rows:
+                    await asyncio.sleep(FETCH_INTERVAL)
+                    continue
+
+                latest = max(rows, key=lambda x: x["dt"])
+                uid = f"{latest['dt']}_{latest['num']}"
+
+                if uid in sent:
+                    await asyncio.sleep(FETCH_INTERVAL)
+                    continue
+
+                msg = latest["message"]
+                if not is_otp(msg):
+                    continue
+
+                phone = extract_phone(msg) or latest["num"]
+                flag, country = detect_country(phone)
+
+                text = (
+                    "📩 *NEW OTP*\n\n"
+                    f"{flag} *Country:* {country}\n"
+                    f"📞 *Number:* `{phone}`\n"
+                    f"🕒 *Time:* `{latest['dt']}`\n"
+                    f"🔗 *Source:* {latest['_src']}\n\n"
+                    f"💬 {msg}"
+                )
+
+                await bot.send_message(CHAT_ID, text, parse_mode="Markdown")
+                sent.add(uid)
+                save_json(CACHE_FILE, list(sent))
+
+            except Exception as e:
+                log.error(e)
+
+            await asyncio.sleep(FETCH_INTERVAL)
+
+# ================= ADMIN =================
+def admin_only(update):
+    return update.effective_user.id == ADMIN_ID
+
+async def admin(update, ctx):
+    if not admin_only(update): return
+    st = load_json(SOURCE_STATE_FILE, {"Source 1": True, "Source 2": True})
     await update.message.reply_text(
-        "🧩 New Panel Setup\n\n"
-        "Select OTP Mode:\n"
-        "1️⃣ SMS Only\n"
-        "2️⃣ Call Only\n"
-        "3️⃣ SMS + Call"
+        f"🛠 Admin Panel\n\n"
+        f"Source 1: {st['Source 1']}\n"
+        f"Source 2: {st['Source 2']}\n\n"
+        "/source1_on /source1_off\n"
+        "/source2_on /source2_off"
     )
 
-async def panel_flow(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    if uid not in user_states: return
+async def toggle(update, src, val):
+    if not admin_only(update): return
+    st = load_json(SOURCE_STATE_FILE, {})
+    st[src] = val
+    save_json(SOURCE_STATE_FILE, st)
+    await update.message.reply_text(f"{src} {'ON' if val else 'OFF'}")
 
-    state = user_states[uid]
-    txt = update.message.text.strip()
+# ================= MAIN =================
+async def main():
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    if state["step"] == "mode":
-        state["mode"] = {"1":"sms","2":"call","3":"sms_call"}.get(txt)
-        state["step"] = "login"
-        await update.message.reply_text(
-            "🔐 Login Type:\n1️⃣ Username + Password\n2️⃣ Email + Password"
-        )
+    app.add_handler(CommandHandler("admin", admin))
+    app.add_handler(CommandHandler("source1_on", lambda u,c: toggle(u,"Source 1",True)))
+    app.add_handler(CommandHandler("source1_off", lambda u,c: toggle(u,"Source 1",False)))
+    app.add_handler(CommandHandler("source2_on", lambda u,c: toggle(u,"Source 2",True)))
+    app.add_handler(CommandHandler("source2_off", lambda u,c: toggle(u,"Source 2",False)))
 
-    elif state["step"] == "login":
-        state["login"] = "userpass" if txt=="1" else "emailpass"
-        state["step"] = "name"
-        await update.message.reply_text("📛 Enter Panel Name:")
+    asyncio.create_task(otp_loop())
+    await app.run_polling(close_loop=False)
 
-    elif state["step"] == "name":
-        state["name"] = txt
-        state["step"] = "base"
-        await update.message.reply_text("🌐 Enter Base URL:")
-
-    elif state["step"] == "base":
-        state["base"] = txt
-        state["step"] = "sms_api" if state["mode"]!="call" else "call_api"
-        await update.message.reply_text(
-            "📩 Enter SMS API:" if state["mode"]!="call" else "📞 Enter Call API:"
-        )
-
-    elif state["step"] == "sms_api":
-        state["sms_api"] = txt
-        if state["mode"]=="sms_call":
-            state["step"] = "call_api"
-            await update.message.reply_text("📞 Enter Call API:")
-        else:
-            pid = create_panel(state)
-            del user_states[uid]
-            await update.message.reply_text(f"✅ Panel Added\nID: {pid}")
-
-    elif state["step"] == "call_api":
-        state["call_api"] = txt
-        pid = create_panel(state)
-        del user_states[uid]
-        await update.message.reply_text(f"✅ Panel Added\nID: {pid}")
-
-# ---------- REMOVE PANEL ----------
-async def removepanel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id): return
-    if not ctx.args:
-        await update.message.reply_text("Usage: /removepanel PANEL_ID")
-        return
-    ok = remove_panel(ctx.args[0])
-    await update.message.reply_text("✅ Removed" if ok else "❌ Not Found")
-
-# ---------- LIST PANELS ----------
-async def panels(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    p = load_panels()
-    if not p:
-        await update.message.reply_text("No panels")
-        return
-    msg = "🧩 Panels:\n\n"
-    for k,v in p.items():
-        msg += f"{k} | {v['name']} | {v['mode']}\n"
-    await update.message.reply_text(msg)
-
-# ---------- RUN ----------
-app = ApplicationBuilder().token(BOT_TOKEN).build()
-app.add_handler(CommandHandler("start", start))
-app.add_handler(CommandHandler("addpanel", addpanel))
-app.add_handler(CommandHandler("removepanel", removepanel))
-app.add_handler(CommandHandler("panels", panels))
-app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, panel_flow))
-
-app.run_polling()
+if __name__ == "__main__":
+    asyncio.run(main())
