@@ -3,3 +3,4 @@ aiohttp
 flask
 phonenumbers
 pycountry
+python-telegram-bot[job-queue]
