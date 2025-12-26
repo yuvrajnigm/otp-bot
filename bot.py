@@ -1,3 +1,4 @@
+
 import os
 import re
 import json
@@ -6,11 +7,20 @@ import aiohttp
 import logging
 import threading
 from flask import Flask
-from telegram import Bot, Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram import (
+    Bot,
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup
+)
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    CallbackQueryHandler,
+    ContextTypes
+)
 import phonenumbers
 from phonenumbers import geocoder
-import pycountry
 
 # ================= ENV =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -20,13 +30,12 @@ API_TOKEN_1 = os.getenv("API_TOKEN_1")
 API_TOKEN_2 = os.getenv("API_TOKEN_2")
 
 if not all([BOT_TOKEN, CHAT_ID, ADMIN_ID, API_TOKEN_1, API_TOKEN_2]):
-    raise RuntimeError("❌ Missing ENV variables")
+    raise RuntimeError("Missing ENV variables")
 
 # ================= CONFIG =================
 FETCH_INTERVAL = 10
 RECORD_LIMIT = 5
 CACHE_FILE = "sent_cache.json"
-SOURCE_STATE_FILE = "source_state.json"
 
 APIS = [
     {"id": "Source 1", "url": "http://147.135.212.197/crapi/had/viewstats", "token": API_TOKEN_1},
@@ -40,7 +49,7 @@ log = logging.getLogger("OTP-BOT")
 
 bot = Bot(token=BOT_TOKEN)
 
-# ================= KEEP ALIVE =================
+# ================= FLASK (KEEP ALIVE) =================
 app = Flask(__name__)
 
 @app.route("/")
@@ -53,43 +62,48 @@ def run_web():
 threading.Thread(target=run_web, daemon=True).start()
 
 # ================= HELPERS =================
-def load_json(file, default):
-    if os.path.exists(file):
-        with open(file) as f:
-            return json.load(f)
-    return default
+def load_cache():
+    if os.path.exists(CACHE_FILE):
+        with open(CACHE_FILE) as f:
+            return set(json.load(f))
+    return set()
 
-def save_json(file, data):
-    with open(file, "w") as f:
-        json.dump(data, f)
+def save_cache(data):
+    with open(CACHE_FILE, "w") as f:
+        json.dump(list(data), f)
 
-def is_otp(msg: str):
-    return any(x in msg.lower() for x in ["otp", "code", "verification", "one time"])
-
-def extract_phone(text):
-    m = re.search(r"\+?\d{10,15}", text)
+def extract_otp(message: str):
+    m = re.search(r"\b\d{3}[-\s]?\d{3}\b|\b\d{4,6}\b", message)
     return m.group() if m else None
 
-# ✅ REAL COUNTRY DETECTION (PHONE BASED)
-def detect_country(phone):
+def detect_service(message: str):
+    msg = message.lower()
+    if "whatsapp" in msg:
+        return "WhatsApp 🟢"
+    if "telegram" in msg:
+        return "Telegram ✈️"
+    if "facebook" in msg or "fb" in msg:
+        return "Facebook 📘"
+    return "Unknown ❓"
+
+def detect_country(phone: str):
     try:
         if not phone.startswith("+"):
             phone = "+" + phone
-
         parsed = phonenumbers.parse(phone, None)
-        country_name = geocoder.description_for_number(parsed, "en")
+        country = geocoder.description_for_number(parsed, "en")
         region = phonenumbers.region_code_for_number(parsed)
-
         if region:
             base = 127462 - ord("A")
             flag = chr(base + ord(region[0])) + chr(base + ord(region[1]))
         else:
             flag = "🌍"
-
-        return flag, country_name or "Unknown"
-
+        return flag, country or "Unknown"
     except:
         return "🌍", "Unknown"
+
+def mask_number(num: str):
+    return num[:5] + "****" + num[-4:] if len(num) > 8 else num
 
 # ================= API =================
 async def fetch_api(session, api):
@@ -99,23 +113,19 @@ async def fetch_api(session, api):
         timeout=20
     ) as r:
         if "application/json" not in r.headers.get("Content-Type", ""):
-            log.error(f"Non-JSON response from {api['id']}")
             return []
         data = await r.json()
         return data.get("data", []) if data.get("status") == "success" else []
 
 # ================= OTP LOOP =================
 async def otp_loop():
-    sent = set(load_json(CACHE_FILE, []))
-    state = load_json(SOURCE_STATE_FILE, {"Source 1": True, "Source 2": True})
+    sent = load_cache()
 
     async with aiohttp.ClientSession() as session:
         while True:
             try:
                 rows = []
                 for api in APIS:
-                    if not state.get(api["id"], True):
-                        continue
                     for r in await fetch_api(session, api):
                         r["_src"] = api["id"]
                         rows.append(r)
@@ -124,67 +134,75 @@ async def otp_loop():
                     latest = max(rows, key=lambda x: x["dt"])
                     uid = f"{latest['dt']}_{latest['num']}"
 
-                    if uid not in sent and is_otp(latest.get("message", "")):
-                        phone = extract_phone(latest["message"]) or latest["num"]
+                    if uid not in sent:
+                        msg = latest.get("message", "")
+                        otp = extract_otp(msg)
+                        if not otp:
+                            await asyncio.sleep(FETCH_INTERVAL)
+                            continue
+
+                        phone = latest["num"]
                         flag, country = detect_country(phone)
+                        service = detect_service(msg)
 
                         text = (
-                            "📩 *NEW OTP*\n\n"
-                            f"{flag} *Country:* {country}\n"
-                            f"📞 *Number:* `{phone}`\n"
-                            f"🕒 *Time:* `{latest['dt']}`\n"
-                            f"🔗 *Source:* {latest['_src']}\n\n"
-                            f"💬 {latest['message']}"
+                            f"{flag} *New {country} OTP!*\n\n"
+                            f"🟢 *Service:* {service}\n"
+                            f"📞 *Number:* `{mask_number(phone)}`\n"
+                            f"🔑 *OTP:* `{otp}`\n"
+                            f"🕒 *Time:* `{latest['dt']}`\n\n"
+                            f"📩 *Message:*\n{msg}\n\n"
+                            f"_Powered by Yuvraj 💗_"
                         )
+
+                        keyboard = InlineKeyboardMarkup([
+                            [InlineKeyboardButton("📋 Copy OTP", callback_data=f"copy:{otp}")]
+                        ])
 
                         await bot.send_message(
                             chat_id=CHAT_ID,
                             text=text,
                             parse_mode="Markdown",
+                            reply_markup=keyboard
                         )
 
                         sent.add(uid)
-                        save_json(CACHE_FILE, list(sent))
+                        save_cache(sent)
 
             except Exception as e:
-                log.error("OTP loop error", exc_info=e)
+                log.error(e)
 
             await asyncio.sleep(FETCH_INTERVAL)
 
 # ================= COMMANDS =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🤖 *Bot is Alive!*\n/admin – Admin Panel",
-        parse_mode="Markdown",
+        "🤖 Bot is Alive!\n/admin – Admin Panel"
     )
-
-def admin_only(update: Update):
-    return update.effective_user.id == ADMIN_ID
 
 async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not admin_only(update):
+    if update.effective_user.id != ADMIN_ID:
         return
+    await update.message.reply_text("🛠 Admin OK")
 
-    st = load_json(SOURCE_STATE_FILE, {"Source 1": True, "Source 2": True})
-    await update.message.reply_text(
-        "🛠 *Admin Panel*\n\n"
-        f"Source 1: {'ON ✅' if st['Source 1'] else 'OFF ❌'}\n"
-        f"Source 2: {'ON ✅' if st['Source 2'] else 'OFF ❌'}",
-        parse_mode="Markdown",
-    )
+async def copy_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer("OTP copied ✔️")
+    otp = q.data.split(":")[1]
+    await q.message.reply_text(f"🔑 OTP: `{otp}`", parse_mode="Markdown")
 
 # ================= MAIN =================
-def start_otp_background():
+def start_background():
     asyncio.run(otp_loop())
 
 def main():
     application = ApplicationBuilder().token(BOT_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("admin", admin))
+    application.add_handler(CallbackQueryHandler(copy_handler))
 
-    threading.Thread(target=start_otp_background, daemon=True).start()
+    threading.Thread(target=start_background, daemon=True).start()
     application.run_polling()
 
 if __name__ == "__main__":
     main()
-
