@@ -11,6 +11,9 @@ CHAT_ID = int(os.getenv("CHAT_ID"))
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 PORT = int(os.getenv("PORT", 8080))
 
+if not BOT_TOKEN or not CHAT_ID or not ADMIN_ID:
+    raise RuntimeError("Missing ENV variables")
+
 # ================= FILES =================
 CACHE_FILE = "sent_cache.json"
 SOURCE_FILE = "sources.json"
@@ -38,15 +41,30 @@ threading.Thread(
 ).start()
 
 # ================= UTIL =================
-def load_json(file, default):
-    if os.path.exists(file):
-        with open(file) as f:
-            return json.load(f)
-    return default
-
 def save_json(file, data):
     with open(file, "w") as f:
         json.dump(data, f, indent=2)
+
+def load_json(file, default):
+    if not os.path.exists(file):
+        return default
+
+    with open(file) as f:
+        data = json.load(f)
+
+    # 🔥 AUTO-FIX old LIST format
+    if isinstance(data, list):
+        fixed = {}
+        for i, item in enumerate(data, start=1):
+            fixed[f"Source{i}"] = {
+                "url": item.get("url"),
+                "token": item.get("token"),
+                "enabled": True
+            }
+        save_json(file, fixed)
+        return fixed
+
+    return data
 
 def extract_otp(msg):
     m = re.search(r"\b\d{3}[-\s]?\d{3}\b|\b\d{4,6}\b", msg)
@@ -164,7 +182,7 @@ async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sources = load_json(SOURCE_FILE, {})
     msg = "🛠 *Admin Panel*\n\n"
     if not sources:
-        msg += "No sources added"
+        msg += "No sources added\n"
     else:
         for s, v in sources.items():
             msg += f"{s}: {'ON ✅' if v.get('enabled',True) else 'OFF ❌'}\n"
@@ -174,18 +192,12 @@ async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def addsource(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not admin_only(update): return
     if len(context.args) < 3:
-        await update.message.reply_text(
-            "Usage:\n/addsource Name URL TOKEN"
-        )
+        await update.message.reply_text("Usage:\n/addsource Name URL TOKEN")
         return
 
     name, url, token = context.args[0], context.args[1], context.args[2]
     sources = load_json(SOURCE_FILE, {})
-    sources[name] = {
-        "url": url,
-        "token": token,
-        "enabled": True
-    }
+    sources[name] = {"url": url, "token": token, "enabled": True}
     save_json(SOURCE_FILE, sources)
     await update.message.reply_text(f"✅ Source `{name}` added", parse_mode="Markdown")
 
@@ -194,7 +206,6 @@ async def removesource(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("Usage: /removesource Name")
         return
-
     name = context.args[0]
     sources = load_json(SOURCE_FILE, {})
     if name in sources:
