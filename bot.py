@@ -9,20 +9,15 @@ from phonenumbers import geocoder
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = int(os.getenv("CHAT_ID"))
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
-API_TOKEN_1 = os.getenv("API_TOKEN_1")
-API_TOKEN_2 = os.getenv("API_TOKEN_2")
 PORT = int(os.getenv("PORT", 8080))
+
+# ================= FILES =================
+CACHE_FILE = "sent_cache.json"
+SOURCE_FILE = "sources.json"
 
 # ================= CONFIG =================
 FETCH_INTERVAL = 10
 RECORD_LIMIT = 5
-CACHE_FILE = "sent_cache.json"
-SOURCE_FILE = "source_state.json"
-
-APIS = {
-    "Source 1": {"url": "http://147.135.212.197/crapi/had/viewstats", "token": API_TOKEN_1},
-    "Source 2": {"url": "http://51.77.216.195/crapi/dgroup/viewstats", "token": API_TOKEN_2},
-}
 
 # ================= LOGGING =================
 logging.basicConfig(level=logging.INFO)
@@ -42,7 +37,7 @@ threading.Thread(
     daemon=True
 ).start()
 
-# ================= HELPERS =================
+# ================= UTIL =================
 def load_json(file, default):
     if os.path.exists(file):
         with open(file) as f:
@@ -51,7 +46,7 @@ def load_json(file, default):
 
 def save_json(file, data):
     with open(file, "w") as f:
-        json.dump(data, f)
+        json.dump(data, f, indent=2)
 
 def extract_otp(msg):
     m = re.search(r"\b\d{3}[-\s]?\d{3}\b|\b\d{4,6}\b", msg)
@@ -84,10 +79,10 @@ def mask(num):
     return num[:5] + "****" + num[-4:] if len(num) > 8 else num
 
 # ================= API =================
-async def fetch_api(session, api):
+async def fetch_api(session, src):
     async with session.get(
-        api["url"],
-        params={"token": api["token"], "records": RECORD_LIMIT},
+        src["url"],
+        params={"token": src["token"], "records": RECORD_LIMIT},
         timeout=20
     ) as r:
         if "json" not in r.headers.get("Content-Type", ""):
@@ -98,21 +93,22 @@ async def fetch_api(session, api):
 # ================= OTP LOOP =================
 async def otp_loop():
     sent = set(load_json(CACHE_FILE, []))
-    source_state = load_json(SOURCE_FILE, {"Source 1": True, "Source 2": True})
 
     async with aiohttp.ClientSession() as session:
         while True:
             try:
-                for name, api in APIS.items():
-                    if not source_state.get(name, True):
+                sources = load_json(SOURCE_FILE, {})
+
+                for name, src in sources.items():
+                    if not src.get("enabled", True):
                         continue
 
-                    rows = await fetch_api(session, api)
+                    rows = await fetch_api(session, src)
                     if not rows:
                         continue
 
-                    latest = rows[0]   # 🔥 FIX: no max(dt)
-                    uid = f"{latest.get('dt')}_{latest.get('num')}"
+                    latest = rows[0]
+                    uid = f"{name}_{latest.get('dt')}_{latest.get('num')}"
 
                     if uid in sent:
                         continue
@@ -128,6 +124,7 @@ async def otp_loop():
 
                     text = (
                         f"{flag} *New {country} OTP!*\n\n"
+                        f"📡 *Source:* {name}\n"
                         f"🟢 *Service:* {service}\n"
                         f"📞 *Number:* `{mask(phone)}`\n"
                         f"🔑 *OTP:* `{otp}`\n"
@@ -156,35 +153,67 @@ async def otp_loop():
             await asyncio.sleep(FETCH_INTERVAL)
 
 # ================= COMMANDS =================
+def admin_only(update):
+    return update.effective_user.id == ADMIN_ID
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🤖 Bot is Alive")
 
 async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
+    if not admin_only(update): return
+    sources = load_json(SOURCE_FILE, {})
+    msg = "🛠 *Admin Panel*\n\n"
+    if not sources:
+        msg += "No sources added"
+    else:
+        for s, v in sources.items():
+            msg += f"{s}: {'ON ✅' if v.get('enabled',True) else 'OFF ❌'}\n"
+    msg += "\n/addsource\n/removesource\n/listsources"
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+async def addsource(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not admin_only(update): return
+    if len(context.args) < 3:
+        await update.message.reply_text(
+            "Usage:\n/addsource Name URL TOKEN"
+        )
         return
 
-    state = load_json(SOURCE_FILE, {"Source 1": True, "Source 2": True})
-    await update.message.reply_text(
-        "🛠 *Admin Panel*\n\n"
-        f"Source 1: {'ON ✅' if state['Source 1'] else 'OFF ❌'}\n"
-        f"Source 2: {'ON ✅' if state['Source 2'] else 'OFF ❌'}\n\n"
-        "/source1_on  /source1_off\n"
-        "/source2_on  /source2_off",
-        parse_mode="Markdown"
-    )
+    name, url, token = context.args[0], context.args[1], context.args[2]
+    sources = load_json(SOURCE_FILE, {})
+    sources[name] = {
+        "url": url,
+        "token": token,
+        "enabled": True
+    }
+    save_json(SOURCE_FILE, sources)
+    await update.message.reply_text(f"✅ Source `{name}` added", parse_mode="Markdown")
 
-async def toggle(update, context, src, val):
-    if update.effective_user.id != ADMIN_ID:
+async def removesource(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not admin_only(update): return
+    if not context.args:
+        await update.message.reply_text("Usage: /removesource Name")
         return
-    state = load_json(SOURCE_FILE, {"Source 1": True, "Source 2": True})
-    state[src] = val
-    save_json(SOURCE_FILE, state)
-    await update.message.reply_text(f"{src} {'ON ✅' if val else 'OFF ❌'}")
 
-async def source1_on(u,c): await toggle(u,c,"Source 1",True)
-async def source1_off(u,c): await toggle(u,c,"Source 1",False)
-async def source2_on(u,c): await toggle(u,c,"Source 2",True)
-async def source2_off(u,c): await toggle(u,c,"Source 2",False)
+    name = context.args[0]
+    sources = load_json(SOURCE_FILE, {})
+    if name in sources:
+        del sources[name]
+        save_json(SOURCE_FILE, sources)
+        await update.message.reply_text(f"❌ Source `{name}` removed", parse_mode="Markdown")
+    else:
+        await update.message.reply_text("Source not found")
+
+async def listsources(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not admin_only(update): return
+    sources = load_json(SOURCE_FILE, {})
+    if not sources:
+        await update.message.reply_text("No sources")
+        return
+    msg = "📡 *Sources*\n\n"
+    for s, v in sources.items():
+        msg += f"{s} → {'ON' if v.get('enabled') else 'OFF'}\n"
+    await update.message.reply_text(msg, parse_mode="Markdown")
 
 async def copy_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -198,10 +227,9 @@ def main():
 
     app_tg.add_handler(CommandHandler("start", start))
     app_tg.add_handler(CommandHandler("admin", admin))
-    app_tg.add_handler(CommandHandler("source1_on", source1_on))
-    app_tg.add_handler(CommandHandler("source1_off", source1_off))
-    app_tg.add_handler(CommandHandler("source2_on", source2_on))
-    app_tg.add_handler(CommandHandler("source2_off", source2_off))
+    app_tg.add_handler(CommandHandler("addsource", addsource))
+    app_tg.add_handler(CommandHandler("removesource", removesource))
+    app_tg.add_handler(CommandHandler("listsources", listsources))
     app_tg.add_handler(CallbackQueryHandler(copy_cb))
 
     threading.Thread(target=lambda: asyncio.run(otp_loop()), daemon=True).start()
@@ -209,3 +237,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
