@@ -51,7 +51,7 @@ def load_json(file, default):
     with open(file) as f:
         data = json.load(f)
 
-    # auto-fix old list format
+    # 🔥 auto-fix old list format
     if isinstance(data, list):
         return data
     return data
@@ -169,12 +169,69 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🤖 Bot is Alive")
 
 async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not admin_only(update): return
-    chats = load_json(CHAT_FILE, [])
+    if not admin_only(update):
+        return
+
     sources = load_json(SOURCE_FILE, {})
+    chats = load_json(CHAT_FILE, [])
+
     msg = "🛠 *Admin Panel*\n\n"
-    msg += f"Chats: {len(chats)}\nSources: {len(sources)}\n\n"
-    msg += "/addchat CHAT_ID\n/removechat CHAT_ID\n/listchats"
+
+    if not sources:
+        msg += "No sources added ❌\n"
+    else:
+        for name, src in sources.items():
+            status = "ON ✅" if src.get("enabled", True) else "OFF ❌"
+            msg += f"{name}: {status}\n"
+
+    msg += "\n📡 *Source Commands*\n"
+    msg += "/addsource Name URL TOKEN\n"
+    msg += "/removesource Name\n"
+    msg += "/listsources\n\n"
+
+    msg += "📢 *Chat Commands*\n"
+    msg += "/addchat CHAT_ID\n"
+    msg += "/removechat CHAT_ID\n"
+    msg += "/listchats\n"
+
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+async def addsource(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not admin_only(update): return
+    if len(context.args) < 3:
+        await update.message.reply_text("Usage:\n/addsource Name URL TOKEN")
+        return
+
+    name, url, token = context.args[0], context.args[1], context.args[2]
+    sources = load_json(SOURCE_FILE, {})
+    sources[name] = {"url": url, "token": token, "enabled": True}
+    save_json(SOURCE_FILE, sources)
+    await update.message.reply_text(f"✅ Source `{name}` added", parse_mode="Markdown")
+
+async def removesource(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not admin_only(update): return
+    if not context.args:
+        await update.message.reply_text("Usage: /removesource Name")
+        return
+
+    name = context.args[0]
+    sources = load_json(SOURCE_FILE, {})
+    if name in sources:
+        del sources[name]
+        save_json(SOURCE_FILE, sources)
+        await update.message.reply_text(f"❌ Source `{name}` removed", parse_mode="Markdown")
+    else:
+        await update.message.reply_text("Source not found")
+
+async def listsources(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not admin_only(update): return
+    sources = load_json(SOURCE_FILE, {})
+    if not sources:
+        await update.message.reply_text("No sources")
+        return
+    msg = "📡 *Sources*\n\n"
+    for s, v in sources.items():
+        msg += f"{s} → {'ON' if v.get('enabled') else 'OFF'}\n"
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 async def addchat(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -185,7 +242,6 @@ async def addchat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     chat_id = context.args[0]
     chats = load_json(CHAT_FILE, [])
-
     if chat_id not in chats:
         chats.append(chat_id)
         save_json(CHAT_FILE, chats)
@@ -201,7 +257,6 @@ async def removechat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     chat_id = context.args[0]
     chats = load_json(CHAT_FILE, [])
-
     if chat_id in chats:
         chats.remove(chat_id)
         save_json(CHAT_FILE, chats)
@@ -215,7 +270,6 @@ async def listchats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not chats:
         await update.message.reply_text("No chats added")
         return
-
     msg = "📢 *Chats*\n\n"
     for c in chats:
         msg += f"{c}\n"
@@ -233,6 +287,9 @@ def main():
 
     app_tg.add_handler(CommandHandler("start", start))
     app_tg.add_handler(CommandHandler("admin", admin))
+    app_tg.add_handler(CommandHandler("addsource", addsource))
+    app_tg.add_handler(CommandHandler("removesource", removesource))
+    app_tg.add_handler(CommandHandler("listsources", listsources))
     app_tg.add_handler(CommandHandler("addchat", addchat))
     app_tg.add_handler(CommandHandler("removechat", removechat))
     app_tg.add_handler(CommandHandler("listchats", listchats))
