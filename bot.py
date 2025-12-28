@@ -11,6 +11,7 @@ CHAT_ID = int(os.getenv("CHAT_ID"))
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 API_TOKEN_1 = os.getenv("API_TOKEN_1")
 API_TOKEN_2 = os.getenv("API_TOKEN_2")
+API_TOKEN_3 = os.getenv("API_TOKEN_3")   # 🔥 NEW
 PORT = int(os.getenv("PORT", 8080))
 
 # ================= CONFIG =================
@@ -20,8 +21,18 @@ CACHE_FILE = "sent_cache.json"
 SOURCE_FILE = "source_state.json"
 
 APIS = {
-    "Source 1": {"url": "http://147.135.212.197/crapi/had/viewstats", "token": API_TOKEN_1},
-    "Source 2": {"url": "http://51.77.216.195/crapi/dgroup/viewstats", "token": API_TOKEN_2},
+    "Source 1": {
+        "url": "http://147.135.212.197/crapi/had/viewstats",
+        "token": API_TOKEN_1
+    },
+    "Source 2": {
+        "url": "http://51.77.216.195/crapi/dgroup/viewstats",
+        "token": API_TOKEN_2
+    },
+    "Source 3": {   # 🔥 NEW SOURCE
+        "url": "http://147.135.212.197/crapi/st/viewstats",
+        "token": API_TOKEN_3
+    }
 }
 
 # ================= LOGGING =================
@@ -98,7 +109,10 @@ async def fetch_api(session, api):
 # ================= OTP LOOP =================
 async def otp_loop():
     sent = set(load_json(CACHE_FILE, []))
-    source_state = load_json(SOURCE_FILE, {"Source 1": True, "Source 2": True})
+    source_state = load_json(
+        SOURCE_FILE,
+        {"Source 1": True, "Source 2": True, "Source 3": True}
+    )
 
     async with aiohttp.ClientSession() as session:
         while True:
@@ -106,14 +120,15 @@ async def otp_loop():
                 for name, api in APIS.items():
                     if not source_state.get(name, True):
                         continue
+                    if not api.get("token"):
+                        continue  # token missing
 
                     rows = await fetch_api(session, api)
                     if not rows:
                         continue
 
-                    latest = rows[0]   # 🔥 FIX: no max(dt)
-                    uid = f"{latest.get('dt')}_{latest.get('num')}"
-
+                    latest = rows[0]
+                    uid = f"{name}_{latest.get('dt')}_{latest.get('num')}"
                     if uid in sent:
                         continue
 
@@ -128,6 +143,7 @@ async def otp_loop():
 
                     text = (
                         f"{flag} *New {country} OTP!*\n\n"
+                        f"📡 *Source:* {name}\n"
                         f"🟢 *Service:* {service}\n"
                         f"📞 *Number:* `{mask(phone)}`\n"
                         f"🔑 *OTP:* `{otp}`\n"
@@ -163,20 +179,29 @@ async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
 
-    state = load_json(SOURCE_FILE, {"Source 1": True, "Source 2": True})
+    state = load_json(
+        SOURCE_FILE,
+        {"Source 1": True, "Source 2": True, "Source 3": True}
+    )
+
     await update.message.reply_text(
         "🛠 *Admin Panel*\n\n"
-        f"Source 1: {'ON ✅' if state['Source 1'] else 'OFF ❌'}\n"
-        f"Source 2: {'ON ✅' if state['Source 2'] else 'OFF ❌'}\n\n"
+        f"Source 1: {'ON ✅' if state.get('Source 1') else 'OFF ❌'}\n"
+        f"Source 2: {'ON ✅' if state.get('Source 2') else 'OFF ❌'}\n"
+        f"Source 3: {'ON ✅' if state.get('Source 3') else 'OFF ❌'}\n\n"
         "/source1_on  /source1_off\n"
-        "/source2_on  /source2_off",
+        "/source2_on  /source2_off\n"
+        "/source3_on  /source3_off",
         parse_mode="Markdown"
     )
 
 async def toggle(update, context, src, val):
     if update.effective_user.id != ADMIN_ID:
         return
-    state = load_json(SOURCE_FILE, {"Source 1": True, "Source 2": True})
+    state = load_json(
+        SOURCE_FILE,
+        {"Source 1": True, "Source 2": True, "Source 3": True}
+    )
     state[src] = val
     save_json(SOURCE_FILE, state)
     await update.message.reply_text(f"{src} {'ON ✅' if val else 'OFF ❌'}")
@@ -185,12 +210,13 @@ async def source1_on(u,c): await toggle(u,c,"Source 1",True)
 async def source1_off(u,c): await toggle(u,c,"Source 1",False)
 async def source2_on(u,c): await toggle(u,c,"Source 2",True)
 async def source2_off(u,c): await toggle(u,c,"Source 2",False)
+async def source3_on(u,c): await toggle(u,c,"Source 3",True)
+async def source3_off(u,c): await toggle(u,c,"Source 3",False)
 
 async def copy_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer("Copied ✔️")
-    otp = q.data.split(":")[1]
-    await q.message.reply_text(f"`{otp}`", parse_mode="Markdown")
+    await q.message.reply_text(f"`{q.data.split(':')[1]}`", parse_mode="Markdown")
 
 # ================= MAIN =================
 def main():
@@ -202,6 +228,8 @@ def main():
     app_tg.add_handler(CommandHandler("source1_off", source1_off))
     app_tg.add_handler(CommandHandler("source2_on", source2_on))
     app_tg.add_handler(CommandHandler("source2_off", source2_off))
+    app_tg.add_handler(CommandHandler("source3_on", source3_on))
+    app_tg.add_handler(CommandHandler("source3_off", source3_off))
     app_tg.add_handler(CallbackQueryHandler(copy_cb))
 
     threading.Thread(target=lambda: asyncio.run(otp_loop()), daemon=True).start()
@@ -209,3 +237,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
