@@ -7,20 +7,22 @@ from phonenumbers import geocoder
 
 # ================= ENV =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHAT_ID = int(os.getenv("CHAT_ID"))
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
+API_TOKEN_1 = os.getenv("API_TOKEN_1")
+API_TOKEN_2 = os.getenv("API_TOKEN_2")
 PORT = int(os.getenv("PORT", 8080))
-
-if not BOT_TOKEN or not ADMIN_ID:
-    raise RuntimeError("Missing ENV variables")
-
-# ================= FILES =================
-CACHE_FILE = "sent_cache.json"
-SOURCE_FILE = "sources.json"
-CHAT_FILE = "chats.json"
 
 # ================= CONFIG =================
 FETCH_INTERVAL = 10
 RECORD_LIMIT = 5
+CACHE_FILE = "sent_cache.json"
+SOURCE_FILE = "source_state.json"
+
+APIS = {
+    "Source 1": {"url": "http://147.135.212.197/crapi/had/viewstats", "token": API_TOKEN_1},
+    "Source 2": {"url": "http://51.77.216.195/crapi/dgroup/viewstats", "token": API_TOKEN_2},
+}
 
 # ================= LOGGING =================
 logging.basicConfig(level=logging.INFO)
@@ -31,7 +33,6 @@ bot = Bot(token=BOT_TOKEN)
 
 # ================= FLASK =================
 app = Flask(__name__)
-
 @app.route("/")
 def home():
     return "Bot running"
@@ -41,31 +42,16 @@ threading.Thread(
     daemon=True
 ).start()
 
-# ================= UTIL =================
+# ================= HELPERS =================
+def load_json(file, default):
+    if os.path.exists(file):
+        with open(file) as f:
+            return json.load(f)
+    return default
+
 def save_json(file, data):
     with open(file, "w") as f:
-        json.dump(data, f, indent=2)
-
-def load_json(file, default):
-    if not os.path.exists(file):
-        return default
-
-    with open(file) as f:
-        data = json.load(f)
-
-    # 🔥 AUTO FIX: old LIST format → DICT
-    if isinstance(data, list):
-        fixed = {}
-        for i, item in enumerate(data, start=1):
-            fixed[f"Source{i}"] = {
-                "url": item.get("url"),
-                "token": item.get("token"),
-                "enabled": True
-            }
-        save_json(file, fixed)
-        return fixed
-
-    return data
+        json.dump(data, f)
 
 def extract_otp(msg):
     m = re.search(r"\b\d{3}[-\s]?\d{3}\b|\b\d{4,6}\b", msg)
@@ -73,12 +59,9 @@ def extract_otp(msg):
 
 def detect_service(msg):
     m = msg.lower()
-    if "whatsapp" in m:
-        return "WhatsApp 🟢"
-    if "telegram" in m:
-        return "Telegram ✈️"
-    if "facebook" in m or "fb" in m:
-        return "Facebook 📘"
+    if "whatsapp" in m: return "WhatsApp 🟢"
+    if "telegram" in m: return "Telegram ✈️"
+    if "facebook" in m or "fb" in m: return "Facebook 📘"
     return "Unknown ❓"
 
 def detect_country(phone):
@@ -98,193 +81,116 @@ def detect_country(phone):
         return "🌍", "Unknown"
 
 def mask(num):
-    if not num:
-        return "Unknown"
     return num[:5] + "****" + num[-4:] if len(num) > 8 else num
 
 # ================= API =================
-async def fetch_api(session, src):
-    try:
-        async with session.get(
-            src["url"],
-            params={"token": src["token"], "records": RECORD_LIMIT},
-            timeout=20
-        ) as r:
-            if "json" not in r.headers.get("Content-Type", ""):
-                return []
-            data = await r.json()
-            if data.get("status") != "success":
-                return []
-            return data.get("data", [])
-    except Exception as e:
-        log.error(f"API error ({src.get('url')}): {e}")
-        return []
+async def fetch_api(session, api):
+    async with session.get(
+        api["url"],
+        params={"token": api["token"], "records": RECORD_LIMIT},
+        timeout=20
+    ) as r:
+        if "json" not in r.headers.get("Content-Type", ""):
+            return []
+        data = await r.json()
+        return data.get("data", []) if data.get("status") == "success" else []
 
 # ================= OTP LOOP =================
 async def otp_loop():
     sent = set(load_json(CACHE_FILE, []))
+    source_state = load_json(SOURCE_FILE, {"Source 1": True, "Source 2": True})
 
     async with aiohttp.ClientSession() as session:
         while True:
             try:
-                sources = load_json(SOURCE_FILE, {})
-                chats = load_json(CHAT_FILE, [])
-
-                if not sources or not chats:
-                    await asyncio.sleep(FETCH_INTERVAL)
-                    continue
-
-                for name, src in sources.items():
-                    if not src.get("enabled", True):
+                for name, api in APIS.items():
+                    if not source_state.get(name, True):
                         continue
 
-                    rows = await fetch_api(session, src)
+                    rows = await fetch_api(session, api)
                     if not rows:
                         continue
 
-                    for row in rows[:1]:  # only latest
-                        uid = f"{name}_{row.get('dt')}_{row.get('num')}"
-                        if uid in sent:
-                            continue
+                    latest = rows[0]   # 🔥 FIX: no max(dt)
+                    uid = f"{latest.get('dt')}_{latest.get('num')}"
 
-                        msg = row.get("message", "")
-                        otp = extract_otp(msg)
-                        if not otp:
-                            continue
+                    if uid in sent:
+                        continue
 
-                        phone = row.get("num", "")
-                        flag, country = detect_country(phone)
-                        service = detect_service(msg)
+                    msg = latest.get("message", "")
+                    otp = extract_otp(msg)
+                    if not otp:
+                        continue
 
-                        text = (
-                            f"{flag} *New {country} OTP!*\n\n"
-                            f"📡 *Source:* {name}\n"
-                            f"🟢 *Service:* {service}\n"
-                            f"📞 *Number:* `{mask(phone)}`\n"
-                            f"🔑 *OTP:* `{otp}`\n"
-                            f"🕒 *Time:* `{row.get('dt')}`\n\n"
-                            f"📩 *Message:*\n{msg}\n\n"
-                            f"_Powered by Yuvraj 💗_"
-                        )
+                    phone = latest.get("num", "")
+                    flag, country = detect_country(phone)
+                    service = detect_service(msg)
 
-                        keyboard = InlineKeyboardMarkup([
-                            [InlineKeyboardButton("📋 Copy OTP", callback_data=f"copy:{otp}")]
-                        ])
+                    text = (
+                        f"{flag} *New {country} OTP!*\n\n"
+                        f"🟢 *Service:* {service}\n"
+                        f"📞 *Number:* `{mask(phone)}`\n"
+                        f"🔑 *OTP:* `{otp}`\n"
+                        f"🕒 *Time:* `{latest.get('dt')}`\n\n"
+                        f"📩 *Message:*\n{msg}\n\n"
+                        f"_Powered by Yuvraj 💗_"
+                    )
 
-                        for chat_id in chats:
-                            try:
-                                await bot.send_message(
-                                    chat_id=int(chat_id),
-                                    text=text,
-                                    parse_mode="Markdown",
-                                    reply_markup=keyboard
-                                )
-                            except Exception as e:
-                                log.error(f"Send failed {chat_id}: {e}")
+                    keyboard = InlineKeyboardMarkup([
+                        [InlineKeyboardButton("📋 Copy OTP", callback_data=f"copy:{otp}")]
+                    ])
 
-                        sent.add(uid)
-                        save_json(CACHE_FILE, list(sent))
+                    await bot.send_message(
+                        chat_id=CHAT_ID,
+                        text=text,
+                        parse_mode="Markdown",
+                        reply_markup=keyboard
+                    )
+
+                    sent.add(uid)
+                    save_json(CACHE_FILE, list(sent))
 
             except Exception as e:
-                log.error(f"OTP LOOP ERROR: {e}")
+                log.error(e)
 
             await asyncio.sleep(FETCH_INTERVAL)
 
 # ================= COMMANDS =================
-def admin_only(update):
-    return update.effective_user.id == ADMIN_ID
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🤖 Bot is Alive")
 
 async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not admin_only(update):
+    if update.effective_user.id != ADMIN_ID:
         return
 
-    sources = load_json(SOURCE_FILE, {})
-    chats = load_json(CHAT_FILE, [])
+    state = load_json(SOURCE_FILE, {"Source 1": True, "Source 2": True})
+    await update.message.reply_text(
+        "🛠 *Admin Panel*\n\n"
+        f"Source 1: {'ON ✅' if state['Source 1'] else 'OFF ❌'}\n"
+        f"Source 2: {'ON ✅' if state['Source 2'] else 'OFF ❌'}\n\n"
+        "/source1_on  /source1_off\n"
+        "/source2_on  /source2_off",
+        parse_mode="Markdown"
+    )
 
-    msg = "🛠 *Admin Panel*\n\n"
-
-    if sources:
-        for n, s in sources.items():
-            msg += f"{n}: {'ON ✅' if s.get('enabled',True) else 'OFF ❌'}\n"
-    else:
-        msg += "No sources ❌\n"
-
-    msg += f"\nChats: {len(chats)}\n\n"
-    msg += "/addsource Name URL TOKEN\n"
-    msg += "/removesource Name\n"
-    msg += "/listsources\n\n"
-    msg += "/addchat CHAT_ID\n"
-    msg += "/removechat CHAT_ID\n"
-    msg += "/listchats\n"
-
-    await update.message.reply_text(msg, parse_mode="Markdown")
-
-async def addsource(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not admin_only(update): return
-    if len(context.args) < 3:
-        await update.message.reply_text("Usage: /addsource Name URL TOKEN")
+async def toggle(update, context, src, val):
+    if update.effective_user.id != ADMIN_ID:
         return
+    state = load_json(SOURCE_FILE, {"Source 1": True, "Source 2": True})
+    state[src] = val
+    save_json(SOURCE_FILE, state)
+    await update.message.reply_text(f"{src} {'ON ✅' if val else 'OFF ❌'}")
 
-    name, url, token = context.args[0], context.args[1], context.args[2]
-    sources = load_json(SOURCE_FILE, {})
-    sources[name] = {"url": url, "token": token, "enabled": True}
-    save_json(SOURCE_FILE, sources)
-    await update.message.reply_text(f"✅ Source `{name}` added", parse_mode="Markdown")
-
-async def removesource(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not admin_only(update): return
-    if not context.args:
-        return
-    sources = load_json(SOURCE_FILE, {})
-    if context.args[0] in sources:
-        del sources[context.args[0]]
-        save_json(SOURCE_FILE, sources)
-        await update.message.reply_text("❌ Source removed")
-
-async def listsources(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not admin_only(update): return
-    sources = load_json(SOURCE_FILE, {})
-    if not sources:
-        await update.message.reply_text("No sources")
-        return
-    msg = "📡 *Sources*\n\n"
-    for n, s in sources.items():
-        msg += f"{n} → {'ON' if s.get('enabled') else 'OFF'}\n"
-    await update.message.reply_text(msg, parse_mode="Markdown")
-
-async def addchat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not admin_only(update): return
-    if not context.args:
-        return
-    chats = load_json(CHAT_FILE, [])
-    if context.args[0] not in chats:
-        chats.append(context.args[0])
-        save_json(CHAT_FILE, chats)
-        await update.message.reply_text("✅ Chat added")
-
-async def removechat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not admin_only(update): return
-    chats = load_json(CHAT_FILE, [])
-    if context.args and context.args[0] in chats:
-        chats.remove(context.args[0])
-        save_json(CHAT_FILE, chats)
-        await update.message.reply_text("❌ Chat removed")
-
-async def listchats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not admin_only(update): return
-    chats = load_json(CHAT_FILE, [])
-    if not chats:
-        await update.message.reply_text("No chats")
-        return
-    await update.message.reply_text("\n".join(chats))
+async def source1_on(u,c): await toggle(u,c,"Source 1",True)
+async def source1_off(u,c): await toggle(u,c,"Source 1",False)
+async def source2_on(u,c): await toggle(u,c,"Source 2",True)
+async def source2_off(u,c): await toggle(u,c,"Source 2",False)
 
 async def copy_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer("Copied ✔️")
-    await q.message.reply_text(f"`{q.data.split(':')[1]}`", parse_mode="Markdown")
+    otp = q.data.split(":")[1]
+    await q.message.reply_text(f"`{otp}`", parse_mode="Markdown")
 
 # ================= MAIN =================
 def main():
@@ -292,12 +198,10 @@ def main():
 
     app_tg.add_handler(CommandHandler("start", start))
     app_tg.add_handler(CommandHandler("admin", admin))
-    app_tg.add_handler(CommandHandler("addsource", addsource))
-    app_tg.add_handler(CommandHandler("removesource", removesource))
-    app_tg.add_handler(CommandHandler("listsources", listsources))
-    app_tg.add_handler(CommandHandler("addchat", addchat))
-    app_tg.add_handler(CommandHandler("removechat", removechat))
-    app_tg.add_handler(CommandHandler("listchats", listchats))
+    app_tg.add_handler(CommandHandler("source1_on", source1_on))
+    app_tg.add_handler(CommandHandler("source1_off", source1_off))
+    app_tg.add_handler(CommandHandler("source2_on", source2_on))
+    app_tg.add_handler(CommandHandler("source2_off", source2_off))
     app_tg.add_handler(CallbackQueryHandler(copy_cb))
 
     threading.Thread(target=lambda: asyncio.run(otp_loop()), daemon=True).start()
