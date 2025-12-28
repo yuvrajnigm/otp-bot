@@ -7,16 +7,16 @@ from phonenumbers import geocoder
 
 # ================= ENV =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHAT_ID = int(os.getenv("CHAT_ID"))
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 PORT = int(os.getenv("PORT", 8080))
 
-if not BOT_TOKEN or not CHAT_ID or not ADMIN_ID:
+if not BOT_TOKEN or not ADMIN_ID:
     raise RuntimeError("Missing ENV variables")
 
 # ================= FILES =================
 CACHE_FILE = "sent_cache.json"
 SOURCE_FILE = "sources.json"
+CHAT_FILE = "chats.json"
 
 # ================= CONFIG =================
 FETCH_INTERVAL = 10
@@ -48,22 +48,12 @@ def save_json(file, data):
 def load_json(file, default):
     if not os.path.exists(file):
         return default
-
     with open(file) as f:
         data = json.load(f)
 
-    # 🔥 AUTO-FIX old LIST format
+    # auto-fix old list format
     if isinstance(data, list):
-        fixed = {}
-        for i, item in enumerate(data, start=1):
-            fixed[f"Source{i}"] = {
-                "url": item.get("url"),
-                "token": item.get("token"),
-                "enabled": True
-            }
-        save_json(file, fixed)
-        return fixed
-
+        return data
     return data
 
 def extract_otp(msg):
@@ -116,6 +106,7 @@ async def otp_loop():
         while True:
             try:
                 sources = load_json(SOURCE_FILE, {})
+                chats = load_json(CHAT_FILE, [])
 
                 for name, src in sources.items():
                     if not src.get("enabled", True):
@@ -127,7 +118,6 @@ async def otp_loop():
 
                     latest = rows[0]
                     uid = f"{name}_{latest.get('dt')}_{latest.get('num')}"
-
                     if uid in sent:
                         continue
 
@@ -155,12 +145,13 @@ async def otp_loop():
                         [InlineKeyboardButton("📋 Copy OTP", callback_data=f"copy:{otp}")]
                     ])
 
-                    await bot.send_message(
-                        chat_id=CHAT_ID,
-                        text=text,
-                        parse_mode="Markdown",
-                        reply_markup=keyboard
-                    )
+                    for chat_id in chats:
+                        await bot.send_message(
+                            chat_id=int(chat_id),
+                            text=text,
+                            parse_mode="Markdown",
+                            reply_markup=keyboard
+                        )
 
                     sent.add(uid)
                     save_json(CACHE_FILE, list(sent))
@@ -179,51 +170,55 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not admin_only(update): return
+    chats = load_json(CHAT_FILE, [])
     sources = load_json(SOURCE_FILE, {})
     msg = "🛠 *Admin Panel*\n\n"
-    if not sources:
-        msg += "No sources added\n"
-    else:
-        for s, v in sources.items():
-            msg += f"{s}: {'ON ✅' if v.get('enabled',True) else 'OFF ❌'}\n"
-    msg += "\n/addsource\n/removesource\n/listsources"
+    msg += f"Chats: {len(chats)}\nSources: {len(sources)}\n\n"
+    msg += "/addchat CHAT_ID\n/removechat CHAT_ID\n/listchats"
     await update.message.reply_text(msg, parse_mode="Markdown")
 
-async def addsource(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not admin_only(update): return
-    if len(context.args) < 3:
-        await update.message.reply_text("Usage:\n/addsource Name URL TOKEN")
-        return
-
-    name, url, token = context.args[0], context.args[1], context.args[2]
-    sources = load_json(SOURCE_FILE, {})
-    sources[name] = {"url": url, "token": token, "enabled": True}
-    save_json(SOURCE_FILE, sources)
-    await update.message.reply_text(f"✅ Source `{name}` added", parse_mode="Markdown")
-
-async def removesource(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def addchat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not admin_only(update): return
     if not context.args:
-        await update.message.reply_text("Usage: /removesource Name")
+        await update.message.reply_text("Usage: /addchat CHAT_ID")
         return
-    name = context.args[0]
-    sources = load_json(SOURCE_FILE, {})
-    if name in sources:
-        del sources[name]
-        save_json(SOURCE_FILE, sources)
-        await update.message.reply_text(f"❌ Source `{name}` removed", parse_mode="Markdown")
-    else:
-        await update.message.reply_text("Source not found")
 
-async def listsources(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = context.args[0]
+    chats = load_json(CHAT_FILE, [])
+
+    if chat_id not in chats:
+        chats.append(chat_id)
+        save_json(CHAT_FILE, chats)
+        await update.message.reply_text(f"✅ Chat `{chat_id}` added", parse_mode="Markdown")
+    else:
+        await update.message.reply_text("Chat already exists")
+
+async def removechat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not admin_only(update): return
-    sources = load_json(SOURCE_FILE, {})
-    if not sources:
-        await update.message.reply_text("No sources")
+    if not context.args:
+        await update.message.reply_text("Usage: /removechat CHAT_ID")
         return
-    msg = "📡 *Sources*\n\n"
-    for s, v in sources.items():
-        msg += f"{s} → {'ON' if v.get('enabled') else 'OFF'}\n"
+
+    chat_id = context.args[0]
+    chats = load_json(CHAT_FILE, [])
+
+    if chat_id in chats:
+        chats.remove(chat_id)
+        save_json(CHAT_FILE, chats)
+        await update.message.reply_text(f"❌ Chat `{chat_id}` removed", parse_mode="Markdown")
+    else:
+        await update.message.reply_text("Chat not found")
+
+async def listchats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not admin_only(update): return
+    chats = load_json(CHAT_FILE, [])
+    if not chats:
+        await update.message.reply_text("No chats added")
+        return
+
+    msg = "📢 *Chats*\n\n"
+    for c in chats:
+        msg += f"{c}\n"
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 async def copy_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -238,9 +233,9 @@ def main():
 
     app_tg.add_handler(CommandHandler("start", start))
     app_tg.add_handler(CommandHandler("admin", admin))
-    app_tg.add_handler(CommandHandler("addsource", addsource))
-    app_tg.add_handler(CommandHandler("removesource", removesource))
-    app_tg.add_handler(CommandHandler("listsources", listsources))
+    app_tg.add_handler(CommandHandler("addchat", addchat))
+    app_tg.add_handler(CommandHandler("removechat", removechat))
+    app_tg.add_handler(CommandHandler("listchats", listchats))
     app_tg.add_handler(CallbackQueryHandler(copy_cb))
 
     threading.Thread(target=lambda: asyncio.run(otp_loop()), daemon=True).start()
