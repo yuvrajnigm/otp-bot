@@ -77,9 +77,12 @@ def extract_otp(msg):
 
 def detect_service(msg):
     m = msg.lower()
-    if "whatsapp" in m: return "WhatsApp 🟢"
-    if "telegram" in m: return "Telegram ✈️"
-    if "facebook" in m or "fb" in m: return "Facebook 📘"
+    if "whatsapp" in m:
+        return "WhatsApp 🟢"
+    if "telegram" in m:
+        return "Telegram ✈️"
+    if "facebook" in m or "fb" in m:
+        return "Facebook 📘"
     return "Unknown ❓"
 
 def detect_country(phone):
@@ -103,7 +106,25 @@ def mask(num):
         return "Unknown"
     return num[:5] + "****" + num[-4:] if len(num) > 8 else num
 
-# ================= API (FIXED) =================
+# 🔥 NORMALIZE API ROW (DICT / LIST SAFE)
+def normalize_row(row):
+    if isinstance(row, dict):
+        return {
+            "dt": row.get("dt"),
+            "num": row.get("num"),
+            "service": row.get("service"),
+            "message": row.get("message"),
+        }
+    if isinstance(row, list) and len(row) >= 4:
+        return {
+            "dt": row[0],
+            "num": row[1],
+            "service": row[2],
+            "message": row[3],
+        }
+    return None
+
+# ================= API =================
 async def fetch_api(session, api):
     try:
         async with session.get(
@@ -113,18 +134,11 @@ async def fetch_api(session, api):
         ) as r:
             if "json" not in r.headers.get("Content-Type", ""):
                 return []
-
             data = await r.json()
-
-            # CASE 1: API returns list
             if isinstance(data, list):
                 return data
-
-            # CASE 2: API returns dict
-            if isinstance(data, dict):
-                if "data" in data and isinstance(data["data"], list):
-                    return data["data"]
-
+            if isinstance(data, dict) and isinstance(data.get("data"), list):
+                return data["data"]
             return []
     except Exception as e:
         log.error(f"API error: {e}")
@@ -151,17 +165,23 @@ async def otp_loop():
                     if not rows:
                         continue
 
-                    latest = rows[-1]  # safest
-                    uid = f"{name}_{latest.get('dt')}_{latest.get('num')}"
+                    raw = rows[-1]
+                    latest = normalize_row(raw)
+                    if not latest:
+                        continue
+
+                    dt = latest["dt"]
+                    phone = latest["num"]
+                    msg = latest["message"]
+
+                    uid = f"{name}_{dt}_{phone}"
                     if uid in sent:
                         continue
 
-                    msg = latest.get("message", "")
                     otp = extract_otp(msg)
                     if not otp:
                         continue
 
-                    phone = latest.get("num", "")
                     flag, country = detect_country(phone)
                     service = detect_service(msg)
 
@@ -171,7 +191,7 @@ async def otp_loop():
                         f"🟢 *Service:* {service}\n"
                         f"📞 *Number:* `{mask(phone)}`\n"
                         f"🔑 *OTP:* `{otp}`\n"
-                        f"🕒 *Time:* `{latest.get('dt')}`\n\n"
+                        f"🕒 *Time:* `{dt}`\n\n"
                         f"📩 *Message:*\n{msg}\n\n"
                         f"_Powered by Yuvraj 💗_"
                     )
@@ -202,12 +222,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
-
     state = load_json(
         SOURCE_FILE,
         {"Source 1": True, "Source 2": True, "Source 3": True}
     )
-
     await update.message.reply_text(
         "🛠 *Admin Panel*\n\n"
         f"Source 1: {'ON ✅' if state.get('Source 1') else 'OFF ❌'}\n"
@@ -224,11 +242,9 @@ async def copy_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ================= MAIN =================
 def main():
     app_tg = ApplicationBuilder().token(BOT_TOKEN).build()
-
     app_tg.add_handler(CommandHandler("start", start))
     app_tg.add_handler(CommandHandler("admin", admin))
     app_tg.add_handler(CallbackQueryHandler(copy_cb))
-
     threading.Thread(target=lambda: asyncio.run(otp_loop()), daemon=True).start()
     app_tg.run_polling()
 
