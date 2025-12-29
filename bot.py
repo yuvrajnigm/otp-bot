@@ -11,11 +11,7 @@ CHAT_ID = int(os.getenv("CHAT_ID"))
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 API_TOKEN_1 = os.getenv("API_TOKEN_1")
 API_TOKEN_2 = os.getenv("API_TOKEN_2")
-API_TOKEN_3 = os.getenv("API_TOKEN_3")
 PORT = int(os.getenv("PORT", 8080))
-
-if not all([BOT_TOKEN, CHAT_ID, ADMIN_ID]):
-    raise RuntimeError("Missing ENV variables")
 
 # ================= CONFIG =================
 FETCH_INTERVAL = 10
@@ -26,7 +22,6 @@ SOURCE_FILE = "source_state.json"
 APIS = {
     "Source 1": {"url": "http://147.135.212.197/crapi/had/viewstats", "token": API_TOKEN_1},
     "Source 2": {"url": "http://51.77.216.195/crapi/dgroup/viewstats", "token": API_TOKEN_2},
-    "Source 3": {"url": "http://147.135.212.197/crapi/st/viewstats", "token": API_TOKEN_3},
 }
 
 # ================= LOGGING =================
@@ -59,30 +54,14 @@ def save_json(file, data):
         json.dump(data, f)
 
 def extract_otp(msg):
-    if not msg:
-        return None
-    patterns = [
-        r"\b\d{3}[-\s]\d{3}\b",
-        r"\b\d{6}\b",
-        r"\b\d{5}\b",
-        r"\b\d{4}\b",
-        r"(?:otp|code)[:\s]*([0-9\- ]{4,8})",
-        r"#\d{4,6}"
-    ]
-    for p in patterns:
-        m = re.search(p, msg, re.IGNORECASE)
-        if m:
-            return m.group(1) if m.groups() else m.group()
-    return None
+    m = re.search(r"\b\d{3}[-\s]?\d{3}\b|\b\d{4,6}\b", msg)
+    return m.group() if m else None
 
 def detect_service(msg):
     m = msg.lower()
-    if "whatsapp" in m:
-        return "WhatsApp 🟢"
-    if "telegram" in m:
-        return "Telegram ✈️"
-    if "facebook" in m or "fb" in m:
-        return "Facebook 📘"
+    if "whatsapp" in m: return "WhatsApp 🟢"
+    if "telegram" in m: return "Telegram ✈️"
+    if "facebook" in m or "fb" in m: return "Facebook 📘"
     return "Unknown ❓"
 
 def detect_country(phone):
@@ -102,96 +81,57 @@ def detect_country(phone):
         return "🌍", "Unknown"
 
 def mask(num):
-    if not num:
-        return "Unknown"
     return num[:5] + "****" + num[-4:] if len(num) > 8 else num
-
-# 🔥 NORMALIZE API ROW (DICT / LIST SAFE)
-def normalize_row(row):
-    if isinstance(row, dict):
-        return {
-            "dt": row.get("dt"),
-            "num": row.get("num"),
-            "service": row.get("service"),
-            "message": row.get("message"),
-        }
-    if isinstance(row, list) and len(row) >= 4:
-        return {
-            "dt": row[0],
-            "num": row[1],
-            "service": row[2],
-            "message": row[3],
-        }
-    return None
 
 # ================= API =================
 async def fetch_api(session, api):
-    try:
-        async with session.get(
-            api["url"],
-            params={"token": api["token"], "records": RECORD_LIMIT},
-            timeout=20
-        ) as r:
-            if "json" not in r.headers.get("Content-Type", ""):
-                return []
-            data = await r.json()
-            if isinstance(data, list):
-                return data
-            if isinstance(data, dict) and isinstance(data.get("data"), list):
-                return data["data"]
+    async with session.get(
+        api["url"],
+        params={"token": api["token"], "records": RECORD_LIMIT},
+        timeout=20
+    ) as r:
+        if "json" not in r.headers.get("Content-Type", ""):
             return []
-    except Exception as e:
-        log.error(f"API error: {e}")
-        return []
+        data = await r.json()
+        return data.get("data", []) if data.get("status") == "success" else []
 
 # ================= OTP LOOP =================
 async def otp_loop():
     sent = set(load_json(CACHE_FILE, []))
-    state = load_json(
-        SOURCE_FILE,
-        {"Source 1": True, "Source 2": True, "Source 3": True}
-    )
+    source_state = load_json(SOURCE_FILE, {"Source 1": True, "Source 2": True})
 
     async with aiohttp.ClientSession() as session:
         while True:
             try:
                 for name, api in APIS.items():
-                    if not state.get(name, True):
-                        continue
-                    if not api.get("token"):
+                    if not source_state.get(name, True):
                         continue
 
                     rows = await fetch_api(session, api)
                     if not rows:
                         continue
 
-                    raw = rows[-1]
-                    latest = normalize_row(raw)
-                    if not latest:
-                        continue
+                    latest = rows[0]   # 🔥 FIX: no max(dt)
+                    uid = f"{latest.get('dt')}_{latest.get('num')}"
 
-                    dt = latest["dt"]
-                    phone = latest["num"]
-                    msg = latest["message"]
-
-                    uid = f"{name}_{dt}_{phone}"
                     if uid in sent:
                         continue
 
+                    msg = latest.get("message", "")
                     otp = extract_otp(msg)
                     if not otp:
                         continue
 
+                    phone = latest.get("num", "")
                     flag, country = detect_country(phone)
                     service = detect_service(msg)
 
                     text = (
                         f"{flag} *New {country} OTP!*\n\n"
-                        f"📡 *Source:* {name}\n"
                         f"🟢 *Service:* {service}\n"
                         f"📞 *Number:* `{mask(phone)}`\n"
                         f"🔑 *OTP:* `{otp}`\n"
-                        f"🕒 *Time:* `{dt}`\n\n"
+                        f"🕒 *Time:* `{latest.get('dt')}`\n\n"
                         f"📩 *Message:*\n{msg}\n\n"
                         f"_Powered by Yuvraj 💗_"
                     )
@@ -211,7 +151,7 @@ async def otp_loop():
                     save_json(CACHE_FILE, list(sent))
 
             except Exception as e:
-                log.error(f"OTP LOOP ERROR: {e}")
+                log.error(e)
 
             await asyncio.sleep(FETCH_INTERVAL)
 
@@ -222,29 +162,48 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
-    state = load_json(
-        SOURCE_FILE,
-        {"Source 1": True, "Source 2": True, "Source 3": True}
-    )
+
+    state = load_json(SOURCE_FILE, {"Source 1": True, "Source 2": True})
     await update.message.reply_text(
         "🛠 *Admin Panel*\n\n"
-        f"Source 1: {'ON ✅' if state.get('Source 1') else 'OFF ❌'}\n"
-        f"Source 2: {'ON ✅' if state.get('Source 2') else 'OFF ❌'}\n"
-        f"Source 3: {'ON ✅' if state.get('Source 3') else 'OFF ❌'}",
+        f"Source 1: {'ON ✅' if state['Source 1'] else 'OFF ❌'}\n"
+        f"Source 2: {'ON ✅' if state['Source 2'] else 'OFF ❌'}\n\n"
+        "/source1_on  /source1_off\n"
+        "/source2_on  /source2_off",
         parse_mode="Markdown"
     )
+
+async def toggle(update, context, src, val):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    state = load_json(SOURCE_FILE, {"Source 1": True, "Source 2": True})
+    state[src] = val
+    save_json(SOURCE_FILE, state)
+    await update.message.reply_text(f"{src} {'ON ✅' if val else 'OFF ❌'}")
+
+async def source1_on(u,c): await toggle(u,c,"Source 1",True)
+async def source1_off(u,c): await toggle(u,c,"Source 1",False)
+async def source2_on(u,c): await toggle(u,c,"Source 2",True)
+async def source2_off(u,c): await toggle(u,c,"Source 2",False)
 
 async def copy_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer("Copied ✔️")
-    await q.message.reply_text(f"`{q.data.split(':')[1]}`", parse_mode="Markdown")
+    otp = q.data.split(":")[1]
+    await q.message.reply_text(f"`{otp}`", parse_mode="Markdown")
 
 # ================= MAIN =================
 def main():
     app_tg = ApplicationBuilder().token(BOT_TOKEN).build()
+
     app_tg.add_handler(CommandHandler("start", start))
     app_tg.add_handler(CommandHandler("admin", admin))
+    app_tg.add_handler(CommandHandler("source1_on", source1_on))
+    app_tg.add_handler(CommandHandler("source1_off", source1_off))
+    app_tg.add_handler(CommandHandler("source2_on", source2_on))
+    app_tg.add_handler(CommandHandler("source2_off", source2_off))
     app_tg.add_handler(CallbackQueryHandler(copy_cb))
+
     threading.Thread(target=lambda: asyncio.run(otp_loop()), daemon=True).start()
     app_tg.run_polling()
 
