@@ -14,7 +14,7 @@ API_TOKEN_2 = os.getenv("API_TOKEN_2")
 PORT = int(os.getenv("PORT", 8080))
 
 if not all([BOT_TOKEN, CHAT_ID, ADMIN_ID]):
-    raise RuntimeError("Missing ENV variables")
+    raise RuntimeError("Missing ENV")
 
 # ================= CONFIG =================
 FETCH_INTERVAL = 10
@@ -52,7 +52,7 @@ threading.Thread(
     daemon=True
 ).start()
 
-# ================= HELPERS =================
+# ================= UTIL =================
 def load_json(file, default):
     if os.path.exists(file):
         with open(file) as f:
@@ -63,14 +63,14 @@ def save_json(file, data):
     with open(file, "w") as f:
         json.dump(data, f)
 
+# ---------- OTP DETECTOR (STRONG) ----------
 def extract_otp(msg):
     if not msg:
         return None
     patterns = [
-        r"\b\d{3}[-\s]\d{3}\b",
-        r"\b\d{6}\b",
-        r"\b\d{5}\b",
-        r"\b\d{4}\b",
+        r"\b\d{3}[-\s]\d{3}\b",      # 208-882
+        r"\b\d{6}\b",                # 486839
+        r"\b\d{4,5}\b",              # 1234 / 12345
         r"(?:otp|code)[:\s]*([0-9\- ]{4,8})",
         r"#\d{4,6}"
     ]
@@ -109,27 +109,28 @@ def detect_country(phone):
 def mask(num):
     if not num:
         return "Unknown"
-    return num[:5] + "****" + num[-4:] if len(num) > 8 else num
+    return num[:5] + "****" + num[-4:]
 
-# 🔥 LIST / DICT SAFE ROW
+# ---------- NORMALIZE ROW ----------
 def normalize_row(row):
+    # dict based
     if isinstance(row, dict):
         return {
             "dt": row.get("dt"),
             "num": row.get("num"),
-            "service": row.get("service"),
-            "message": row.get("message"),
+            "message": row.get("message", "")
         }
+
+    # list based
     if isinstance(row, list) and len(row) >= 4:
         return {
             "dt": row[0],
             "num": row[1],
-            "service": row[2],
-            "message": row[3],
+            "message": row[3]
         }
     return None
 
-# ================= API =================
+# ================= API FETCH (HTML SAFE) =================
 async def fetch_api(session, api):
     try:
         async with session.get(
@@ -138,16 +139,18 @@ async def fetch_api(session, api):
             timeout=20
         ) as r:
 
-            ct = r.headers.get("Content-Type", "")
-            if "json" not in ct.lower():
-                log.warning(f"HTML response ignored: {api['url']}")
+            # ❌ HTML response → ignore
+            if "json" not in r.headers.get("Content-Type", ""):
+                log.warning(f"HTML response ignored from {api['url']}")
                 return []
 
             data = await r.json()
 
+            # API returns list
             if isinstance(data, list):
                 return data
 
+            # API returns dict
             if isinstance(data, dict) and isinstance(data.get("data"), list):
                 return data["data"]
 
@@ -160,10 +163,7 @@ async def fetch_api(session, api):
 # ================= OTP LOOP =================
 async def otp_loop():
     sent = set(load_json(CACHE_FILE, []))
-    state = load_json(
-        SOURCE_FILE,
-        {"Source 1": True, "Source 2": True}
-    )
+    state = load_json(SOURCE_FILE, {"Source 1": True, "Source 2": True})
 
     async with aiohttp.ClientSession() as session:
         while True:
@@ -179,13 +179,13 @@ async def otp_loop():
                         continue
 
                     raw = rows[-1]
-                    latest = normalize_row(raw)
-                    if not latest:
+                    data = normalize_row(raw)
+                    if not data:
                         continue
 
-                    dt = latest["dt"]
-                    phone = latest["num"]
-                    msg = latest["message"]
+                    dt = data["dt"]
+                    phone = data["num"]
+                    msg = data["message"]
 
                     uid = f"{name}_{dt}_{phone}"
                     if uid in sent:
