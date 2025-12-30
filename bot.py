@@ -13,14 +13,13 @@ API_TOKEN_1 = os.getenv("API_TOKEN_1")
 API_TOKEN_2 = os.getenv("API_TOKEN_2")
 PORT = int(os.getenv("PORT", 8080))
 
-if not all([BOT_TOKEN, CHAT_ID, ADMIN_ID]):
-    raise RuntimeError("Missing ENV")
+if not BOT_TOKEN or not CHAT_ID or not ADMIN_ID:
+    raise RuntimeError("Missing ENV variables")
 
 # ================= CONFIG =================
 FETCH_INTERVAL = 10
 RECORD_LIMIT = 5
 CACHE_FILE = "sent_cache.json"
-SOURCE_FILE = "source_state.json"
 
 APIS = {
     "Source 1": {
@@ -52,41 +51,35 @@ threading.Thread(
     daemon=True
 ).start()
 
-# ================= UTIL =================
-def load_json(file, default):
-    if os.path.exists(file):
-        with open(file) as f:
-            return json.load(f)
-    return default
+# ================= HELPERS =================
+def load_cache():
+    if os.path.exists(CACHE_FILE):
+        with open(CACHE_FILE) as f:
+            return set(json.load(f))
+    return set()
 
-def save_json(file, data):
-    with open(file, "w") as f:
-        json.dump(data, f)
+def save_cache(data):
+    with open(CACHE_FILE, "w") as f:
+        json.dump(list(data), f)
 
-# ---------- OTP DETECTOR (STRONG) ----------
-def extract_otp(msg):
-    if not msg:
+def extract_otp(message: str):
+    """
+    🔥 FINAL OTP LOGIC:
+    - Find ALL numbers (4–8 digit)
+    - Return the LAST one (actual OTP)
+    """
+    if not message:
         return None
-    patterns = [
-        r"\b\d{3}[-\s]\d{3}\b",      # 208-882
-        r"\b\d{6}\b",                # 486839
-        r"\b\d{4,5}\b",              # 1234 / 12345
-        r"(?:otp|code)[:\s]*([0-9\- ]{4,8})",
-        r"#\d{4,6}"
-    ]
-    for p in patterns:
-        m = re.search(p, msg, re.IGNORECASE)
-        if m:
-            return m.group(1) if m.groups() else m.group()
-    return None
+    matches = re.findall(r"\b\d{4,8}\b", message)
+    return matches[-1] if matches else None
 
 def detect_service(msg):
-    m = msg.lower()
-    if "whatsapp" in m:
+    msg = msg.lower()
+    if "whatsapp" in msg:
         return "WhatsApp 🟢"
-    if "telegram" in m:
+    if "telegram" in msg:
         return "Telegram ✈️"
-    if "facebook" in m or "fb" in m:
+    if "facebook" in msg or "fb" in msg:
         return "Facebook 📘"
     return "Unknown ❓"
 
@@ -107,30 +100,9 @@ def detect_country(phone):
         return "🌍", "Unknown"
 
 def mask(num):
-    if not num:
-        return "Unknown"
-    return num[:5] + "****" + num[-4:]
+    return num[:5] + "****" + num[-4:] if num and len(num) > 8 else num
 
-# ---------- NORMALIZE ROW ----------
-def normalize_row(row):
-    # dict based
-    if isinstance(row, dict):
-        return {
-            "dt": row.get("dt"),
-            "num": row.get("num"),
-            "message": row.get("message", "")
-        }
-
-    # list based
-    if isinstance(row, list) and len(row) >= 4:
-        return {
-            "dt": row[0],
-            "num": row[1],
-            "message": row[3]
-        }
-    return None
-
-# ================= API FETCH (HTML SAFE) =================
+# ================= API =================
 async def fetch_api(session, api):
     try:
         async with session.get(
@@ -141,36 +113,31 @@ async def fetch_api(session, api):
 
             # ❌ HTML response → ignore
             if "json" not in r.headers.get("Content-Type", ""):
-                log.warning(f"HTML response ignored from {api['url']}")
+                log.warning(f"HTML response ignored: {api['url']}")
                 return []
 
             data = await r.json()
 
-            # API returns list
-            if isinstance(data, list):
-                return data
-
-            # API returns dict
             if isinstance(data, dict) and isinstance(data.get("data"), list):
                 return data["data"]
+
+            if isinstance(data, list):
+                return data
 
             return []
 
     except Exception as e:
-        log.error(f"API ERROR {api['url']}: {e}")
+        log.error(f"API ERROR ({api['url']}): {e}")
         return []
 
 # ================= OTP LOOP =================
 async def otp_loop():
-    sent = set(load_json(CACHE_FILE, []))
-    state = load_json(SOURCE_FILE, {"Source 1": True, "Source 2": True})
+    sent = load_cache()
 
     async with aiohttp.ClientSession() as session:
         while True:
             try:
                 for name, api in APIS.items():
-                    if not state.get(name, True):
-                        continue
                     if not api.get("token"):
                         continue
 
@@ -178,16 +145,19 @@ async def otp_loop():
                     if not rows:
                         continue
 
-                    raw = rows[-1]
-                    data = normalize_row(raw)
-                    if not data:
+                    row = rows[-1]  # latest
+
+                    # Support LIST or DICT
+                    if isinstance(row, list) and len(row) >= 4:
+                        dt, num, service_raw, msg = row[0], row[1], row[2], row[3]
+                    elif isinstance(row, dict):
+                        dt = row.get("dt")
+                        num = row.get("num")
+                        msg = row.get("message")
+                    else:
                         continue
 
-                    dt = data["dt"]
-                    phone = data["num"]
-                    msg = data["message"]
-
-                    uid = f"{name}_{dt}_{phone}"
+                    uid = f"{name}_{dt}_{num}"
                     if uid in sent:
                         continue
 
@@ -195,14 +165,14 @@ async def otp_loop():
                     if not otp:
                         continue
 
-                    flag, country = detect_country(phone)
+                    flag, country = detect_country(num)
                     service = detect_service(msg)
 
                     text = (
                         f"{flag} *New {country} OTP!*\n\n"
                         f"📡 *Source:* {name}\n"
                         f"🟢 *Service:* {service}\n"
-                        f"📞 *Number:* `{mask(phone)}`\n"
+                        f"📞 *Number:* `{mask(num)}`\n"
                         f"🔑 *OTP:* `{otp}`\n"
                         f"🕒 *Time:* `{dt}`\n\n"
                         f"📩 *Message:*\n{msg}\n\n"
@@ -221,7 +191,7 @@ async def otp_loop():
                     )
 
                     sent.add(uid)
-                    save_json(CACHE_FILE, list(sent))
+                    save_cache(sent)
 
             except Exception as e:
                 log.error(f"OTP LOOP ERROR: {e}")
@@ -235,13 +205,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
-    state = load_json(SOURCE_FILE, {"Source 1": True, "Source 2": True})
-    await update.message.reply_text(
-        "🛠 *Admin Panel*\n\n"
-        f"Source 1: {'ON ✅' if state.get('Source 1') else 'OFF ❌'}\n"
-        f"Source 2: {'ON ✅' if state.get('Source 2') else 'OFF ❌'}",
-        parse_mode="Markdown"
-    )
+    await update.message.reply_text("🛠 Bot running perfectly")
 
 async def copy_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -259,4 +223,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
