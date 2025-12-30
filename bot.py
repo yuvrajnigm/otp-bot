@@ -44,12 +44,15 @@ APIS = [
 ]
 
 # ================= LOGGING =================
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+)
 log = logging.getLogger("OTP-BOT")
 
 bot = Bot(token=BOT_TOKEN)
 
-# ================= KEEP ALIVE =================
+# ================= KEEP ALIVE (PORT FIX) =================
 app = Flask(__name__)
 
 @app.route("/")
@@ -57,7 +60,8 @@ def home():
     return "Bot running"
 
 def run_web():
-    app.run(host="0.0.0.0", port=8080)
+    port = int(os.environ.get("PORT", 10000))  # 🔥 Render FIX
+    app.run(host="0.0.0.0", port=port)
 
 threading.Thread(target=run_web, daemon=True).start()
 
@@ -176,9 +180,9 @@ async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     st = load_json(SOURCE_STATE_FILE, {"Source 1": True, "Source 2": True})
     await update.message.reply_text(
-        f"🛠 Admin Panel\n\n"
-        f"Source 1: {'ON' if st['Source 1'] else 'OFF'}\n"
-        f"Source 2: {'ON' if st['Source 2'] else 'OFF'}"
+        "🛠 Admin Panel\n\n"
+        f"Source 1: {'ON ✅' if st['Source 1'] else 'OFF ❌'}\n"
+        f"Source 2: {'ON ✅' if st['Source 2'] else 'OFF ❌'}"
     )
 
 async def toggle(update: Update, src: str, val: bool):
@@ -187,24 +191,24 @@ async def toggle(update: Update, src: str, val: bool):
     st = load_json(SOURCE_STATE_FILE, {})
     st[src] = val
     save_json(SOURCE_STATE_FILE, st)
-    await update.message.reply_text(f"{src} {'ON' if val else 'OFF'}")
+    await update.message.reply_text(f"{src} {'ON ✅' if val else 'OFF ❌'}")
 
 # ================= MAIN =================
 def start_otp_background():
     asyncio.run(otp_loop())
 
 def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    application = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("admin", admin))
-    app.add_handler(CommandHandler("source1_on", lambda u, c: toggle(u, "Source 1", True)))
-    app.add_handler(CommandHandler("source1_off", lambda u, c: toggle(u, "Source 1", False)))
-    app.add_handler(CommandHandler("source2_on", lambda u, c: toggle(u, "Source 2", True)))
-    app.add_handler(CommandHandler("source2_off", lambda u, c: toggle(u, "Source 2", False)))
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("admin", admin))
+    application.add_handler(CommandHandler("source1_on", lambda u, c: toggle(u, "Source 1", True)))
+    application.add_handler(CommandHandler("source1_off", lambda u, c: toggle(u, "Source 1", False)))
+    application.add_handler(CommandHandler("source2_on", lambda u, c: toggle(u, "Source 2", True)))
+    application.add_handler(CommandHandler("source2_off", lambda u, c: toggle(u, "Source 2", False)))
 
     threading.Thread(target=start_otp_background, daemon=True).start()
-    app.run_polling()
+    application.run_polling()
 
 if __name__ == "__main__":
     main()
