@@ -42,6 +42,10 @@ def save_cache():
     with open(CACHE_FILE, "w") as f:
         json.dump(sent_cache, f)
 
+def clear_cache():
+    sent_cache.clear()
+    save_cache()
+
 def cleanup_cache():
     now = time.time()
     for k in list(sent_cache.keys()):
@@ -112,17 +116,20 @@ async def fetch_api(session, url, token):
         print("API ERROR:", e)
         return []
 
-# ================= /STATUS COMMAND =================
+# ================= ADMIN COMMANDS =================
 async def check_admin_commands():
     global LAST_UPDATE_ID
     updates = await bot.get_updates(offset=LAST_UPDATE_ID + 1, timeout=0)
+
     for u in updates:
         LAST_UPDATE_ID = u.update_id
-        if not u.message:
+
+        if not u.message or u.message.chat_id != ADMIN_ID:
             continue
-        if u.message.chat_id != ADMIN_ID:
-            continue
-        if u.message.text.strip() == "/status":
+
+        text = u.message.text.strip()
+
+        if text == "/status":
             uptime = int(time.time() - START_TIME)
             h, m = divmod(uptime // 60, 60)
             msg = (
@@ -133,6 +140,14 @@ async def check_admin_commands():
                 "🟢 Platform: Railway"
             )
             await bot.send_message(ADMIN_ID, msg)
+
+        elif text == "/clearcache":
+            clear_cache()
+            await bot.send_message(
+                ADMIN_ID,
+                "🧹 Cache Cleared Successfully!\n"
+                f"📊 Cached OTPs: {len(sent_cache)}"
+            )
 
 # ================= WORKER =================
 async def worker():
