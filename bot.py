@@ -1,6 +1,10 @@
-import asyncio, aiohttp, json, os, re, threading, time
+import asyncio
+import aiohttp
+import json
+import os
+import re
+import time
 from telegram import Bot
-from flask import Flask
 import phonenumbers
 from phonenumbers import geocoder
 
@@ -24,14 +28,19 @@ OTP_TTL = 86400  # 24 hours
 
 bot = Bot(token=BOT_TOKEN)
 START_TIME = time.time()
+LAST_UPDATE_ID = 0
 
 # ================= CACHE =================
-sent_cache = {}  # uid -> timestamp
+sent_cache = {}
 if os.path.exists(CACHE_FILE):
-    sent_cache = json.load(open(CACHE_FILE))
+    try:
+        sent_cache = json.load(open(CACHE_FILE))
+    except:
+        sent_cache = {}
 
 def save_cache():
-    json.dump(sent_cache, open(CACHE_FILE, "w"))
+    with open(CACHE_FILE, "w") as f:
+        json.dump(sent_cache, f)
 
 def cleanup_cache():
     now = time.time()
@@ -53,11 +62,14 @@ def country_details(number):
 
 # ================= SERVICE =================
 def detect_service(cli, msg):
-    t = (cli + msg).lower()
-    if "whatsapp" in t: return "WhatsApp","🟢","🔔🔔🔔"
-    if "facebook" in t: return "Facebook","🔵","🚨🚨🚨"
-    if "google" in t: return "Google","🟡","🔥🔥🔥"
-    return cli.upper(),"📩","🔔🔔🔔"
+    text = (cli + msg).lower()
+    if "whatsapp" in text:
+        return "WhatsApp", "🟢", "🔔🔔🔔"
+    if "facebook" in text:
+        return "Facebook", "🔵", "🚨🚨🚨"
+    if "google" in text:
+        return "Google", "🟡", "🔥🔥🔥"
+    return cli.upper(), "📩", "🔔🔔🔔"
 
 def extract_otp(msg):
     m = re.search(r"\b\d{3}[- ]?\d{3}\b|\b\d{4,8}\b", msg)
@@ -80,46 +92,76 @@ def format_message(d):
 
 ━━━━━━━━━━━━━━━━━━
 👑 Owner: 💗 Yuvraj 💗
-🏷️ #{country.replace(" ","")} #{service}OTP
+🏷️ #{country.replace(" ", "")} #{service}OTP
 ━━━━━━━━━━━━━━━━━━
 """.strip()
 
-# ================= FETCH =================
+# ================= API FETCH =================
 async def fetch_api(session, url, token):
-    async with session.get(url, params={"token":token,"records":RECORDS}, timeout=20) as r:
-        if r.status != 200:
-            return []
-        return (await r.json()).get("data", [])
+    try:
+        async with session.get(
+            url,
+            params={"token": token, "records": RECORDS},
+            timeout=aiohttp.ClientTimeout(total=20),
+        ) as r:
+            if r.status != 200:
+                return []
+            data = await r.json()
+            return data.get("data", [])
+    except Exception as e:
+        print("API ERROR:", e)
+        return []
 
+# ================= /STATUS COMMAND =================
+async def check_admin_commands():
+    global LAST_UPDATE_ID
+    updates = await bot.get_updates(offset=LAST_UPDATE_ID + 1, timeout=0)
+    for u in updates:
+        LAST_UPDATE_ID = u.update_id
+        if not u.message:
+            continue
+        if u.message.chat_id != ADMIN_ID:
+            continue
+        if u.message.text.strip() == "/status":
+            uptime = int(time.time() - START_TIME)
+            h, m = divmod(uptime // 60, 60)
+            msg = (
+                "✅ OTP Bot Online\n"
+                f"⏱ Uptime: {h}h {m}m\n"
+                f"📊 Cached OTPs: {len(sent_cache)}\n"
+                f"🔁 Fetch interval: {FETCH_INTERVAL} sec\n"
+                "🟢 Platform: Railway"
+            )
+            await bot.send_message(ADMIN_ID, msg)
+
+# ================= WORKER =================
 async def worker():
+    print("🚀 OTP BOT STARTED (Railway Worker)")
     async with aiohttp.ClientSession() as session:
         while True:
             try:
                 cleanup_cache()
+                await check_admin_commands()
+
                 for _, url, token in APIS:
-                    data = await fetch_api(session, url, token)
-                    for d in data:
+                    records = await fetch_api(session, url, token)
+                    for d in records:
                         uid = d["dt"] + d["num"] + d["message"]
                         if uid in sent_cache:
                             continue
                         sent_cache[uid] = time.time()
                         save_cache()
-                        await bot.send_message(CHANNEL_ID, format_message(d))
+                        await bot.send_message(
+                            chat_id=CHANNEL_ID,
+                            text=format_message(d),
+                            parse_mode="Markdown",
+                        )
+
+                await asyncio.sleep(FETCH_INTERVAL)
             except Exception as e:
-                print("SAFE ERROR:", e)
+                print("SAFE LOOP ERROR:", e)
                 await asyncio.sleep(5)
-            await asyncio.sleep(FETCH_INTERVAL)
-
-# ================= KEEP ALIVE =================
-app = Flask("alive")
-@app.route("/")
-def home():
-    return "BOT LIVE"
-
-def run_flask():
-    app.run(host="0.0.0.0", port=8080)
 
 # ================= START =================
 if __name__ == "__main__":
-    threading.Thread(target=run_flask).start()
     asyncio.run(worker())
