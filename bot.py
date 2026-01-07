@@ -5,14 +5,14 @@ import os
 import re
 import time
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime
 from flask import Flask
 from telegram import Bot
 import phonenumbers
 from phonenumbers import geocoder
 
-# ================= CONFIG =================
-BOT_TOKEN = "8294446224:AAFqPZ_vIplWVRXWRlC0sxODrYa8us3gHgk"
+# ================= BASIC CONFIG =================
+BOT_TOKEN = "8363735598:AAHf_O4pCS9A6V0m175tf2YpZcmglfsNkNw"
 CHANNEL_ID = -1003406789899
 ADMIN_ID = 8449115253
 
@@ -32,13 +32,25 @@ OTP_TTL = 86400
 SELF_PING_URL = os.getenv("SELF_PING_URL")
 SELF_PING_INTERVAL = 300  # 5 min
 
+# ================= DGROUP CONTROL =================
+DGROUP_FAIL_COUNT = 0
+DGROUP_DISABLED_UNTIL = 0
+DGROUP_MAX_FAILS = 5
+DGROUP_DISABLE_TIME = 600
+DGROUP_RETRY_DELAY = 30
+
+# ================= ERROR ALERT CONTROL =================
+LAST_ERROR_TIME = 0
+ERROR_COOLDOWN = 300
+
+# ================= BOT INIT =================
 bot = Bot(token=BOT_TOKEN)
 bot.delete_webhook(drop_pending_updates=True)
 
 app = Flask(__name__)
 START_TIME = time.time()
 
-# ================= STATS =================
+# ================= DAILY STATS =================
 sent_today = 0
 last_report_date = datetime.utcnow().date()
 
@@ -51,7 +63,8 @@ if os.path.exists(CACHE_FILE):
         sent_cache = {}
 
 def save_cache():
-    json.dump(sent_cache, open(CACHE_FILE, "w"))
+    with open(CACHE_FILE, "w") as f:
+        json.dump(sent_cache, f)
 
 def cleanup_cache():
     now = time.time()
@@ -74,9 +87,12 @@ def country_details(number):
 # ================= SERVICE =================
 def detect_service(cli, msg):
     t = (cli + msg).lower()
-    if "whatsapp" in t: return "WhatsApp", "🟢"
-    if "facebook" in t: return "Facebook", "🔵"
-    if "google" in t: return "Google", "🟡"
+    if "whatsapp" in t:
+        return "WhatsApp", "🟢"
+    if "facebook" in t:
+        return "Facebook", "🔵"
+    if "google" in t:
+        return "Google", "🟡"
     return cli.upper(), "📩"
 
 def extract_otp(msg):
@@ -108,13 +124,17 @@ def health():
 
 # ================= ALERT =================
 async def send_crash_alert(error):
+    global LAST_ERROR_TIME
+    now = time.time()
+    if now - LAST_ERROR_TIME < ERROR_COOLDOWN:
+        return
+    LAST_ERROR_TIME = now
     try:
         await bot.send_message(
             ADMIN_ID,
             f"🚨 OTP BOT ERROR ALERT 🚨\n"
             f"⏰ Time: {datetime.utcnow()}\n"
-            f"❌ Error: {error}\n"
-            f"🖥 Platform: Render"
+            f"❌ Error: {error}"
         )
     except:
         pass
@@ -154,25 +174,60 @@ async def self_ping():
 
 # ================= OTP WORKER =================
 async def otp_worker():
-    global sent_today
+    global sent_today, DGROUP_FAIL_COUNT, DGROUP_DISABLED_UNTIL
+
     async with aiohttp.ClientSession() as session:
         while True:
             try:
                 cleanup_cache()
-                for _, url, token in APIS:
-                    async with session.get(url, params={"token": token, "records": RECORDS}, timeout=20) as r:
-                        if r.status != 200:
+
+                for name, url, token in APIS:
+
+                    if name == "DGROUP":
+                        if time.time() < DGROUP_DISABLED_UNTIL:
                             continue
-                        data = (await r.json()).get("data", [])
-                        for d in data:
-                            uid = d["dt"] + d["num"] + d["message"]
-                            if uid in sent_cache:
-                                continue
-                            sent_cache[uid] = time.time()
-                            save_cache()
-                            sent_today += 1
-                            bot.send_message(CHANNEL_ID, format_message(d))
+
+                    try:
+                        async with session.get(
+                            url,
+                            params={"token": token, "records": RECORDS},
+                            timeout=20
+                        ) as r:
+
+                            ctype = r.headers.get("Content-Type", "")
+                            if "application/json" not in ctype:
+                                raise Exception(f"{name} non-JSON response")
+
+                            data = (await r.json()).get("data", [])
+
+                            if name == "DGROUP":
+                                DGROUP_FAIL_COUNT = 0
+
+                            for d in data:
+                                uid = d["dt"] + d["num"] + d["message"]
+                                if uid in sent_cache:
+                                    continue
+                                sent_cache[uid] = time.time()
+                                save_cache()
+                                sent_today += 1
+                                bot.send_message(CHANNEL_ID, format_message(d))
+
+                    except Exception as e:
+                        if name == "DGROUP":
+                            DGROUP_FAIL_COUNT += 1
+                            if DGROUP_FAIL_COUNT >= DGROUP_MAX_FAILS:
+                                DGROUP_DISABLED_UNTIL = time.time() + DGROUP_DISABLE_TIME
+                                DGROUP_FAIL_COUNT = 0
+                                await bot.send_message(
+                                    ADMIN_ID,
+                                    "⚠️ DGROUP API disabled for 10 minutes (auto)"
+                                )
+                            await asyncio.sleep(DGROUP_RETRY_DELAY)
+                        else:
+                            await send_crash_alert(e)
+
                 await asyncio.sleep(FETCH_INTERVAL)
+
             except Exception as e:
                 await send_crash_alert(e)
                 await asyncio.sleep(5)
