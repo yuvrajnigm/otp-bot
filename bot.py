@@ -12,7 +12,7 @@ import phonenumbers
 from phonenumbers import geocoder
 
 # ================= BASIC CONFIG =================
-BOT_TOKEN = "8294446224:AAEVBGLnx0KigNEOSAHQ4Psb70YYp7Qi938"
+BOT_TOKEN = "8363735598:AAHf_O4pCS9A6V0m175tf2YpZcmglfsNkNw"
 CHANNEL_ID = -1003406789899
 ADMIN_ID = 8449115253
 
@@ -30,7 +30,7 @@ CACHE_FILE = "sent_cache.json"
 OTP_TTL = 86400
 
 SELF_PING_URL = os.getenv("SELF_PING_URL")
-SELF_PING_INTERVAL = 300  # 5 min
+SELF_PING_INTERVAL = 300  # 5 minutes
 
 # ================= DGROUP CONTROL =================
 DGROUP_FAIL_COUNT = 0
@@ -39,7 +39,7 @@ DGROUP_MAX_FAILS = 5
 DGROUP_DISABLE_TIME = 600
 DGROUP_RETRY_DELAY = 30
 
-# ================= ERROR ALERT CONTROL =================
+# ================= ERROR ALERT =================
 LAST_ERROR_TIME = 0
 ERROR_COOLDOWN = 300
 
@@ -122,7 +122,7 @@ def home():
 def health():
     return {"status": "ok", "cache": len(sent_cache)}
 
-# ================= ALERT =================
+# ================= CRASH ALERT =================
 async def send_crash_alert(error):
     global LAST_ERROR_TIME
     now = time.time()
@@ -171,6 +171,49 @@ async def self_ping():
             except:
                 pass
             await asyncio.sleep(SELF_PING_INTERVAL)
+
+# ================= ADMIN COMMAND LISTENER =================
+async def admin_command_listener():
+    offset = None
+    while True:
+        try:
+            updates = await bot.get_updates(offset=offset, timeout=30)
+            for u in updates:
+                offset = u.update_id + 1
+
+                if not u.message or not u.message.text:
+                    continue
+
+                chat_id = u.message.chat.id
+                text = u.message.text.strip()
+
+                if chat_id != ADMIN_ID:
+                    continue
+
+                if text == "/status":
+                    uptime = int(time.time() - START_TIME)
+                    h, m = divmod(uptime // 60, 60)
+                    await bot.send_message(
+                        ADMIN_ID,
+                        f"✅ OTP Bot Online\n"
+                        f"⏱ Uptime: {h}h {m}m\n"
+                        f"📦 Cached OTPs: {len(sent_cache)}\n"
+                        f"🔁 Fetch interval: {FETCH_INTERVAL}s\n"
+                        f"🟢 Platform: Render"
+                    )
+
+                elif text == "/clearcache":
+                    sent_cache.clear()
+                    save_cache()
+                    await bot.send_message(
+                        ADMIN_ID,
+                        "🧹 Cache cleared successfully"
+                    )
+
+        except Exception as e:
+            print("ADMIN CMD ERROR:", e)
+
+        await asyncio.sleep(2)
 
 # ================= OTP WORKER =================
 async def otp_worker():
@@ -239,6 +282,7 @@ def start_async():
     loop.create_task(otp_worker())
     loop.create_task(self_ping())
     loop.create_task(daily_report())
+    loop.create_task(admin_command_listener())
     loop.run_forever()
 
 if __name__ == "__main__":
