@@ -12,7 +12,7 @@ import phonenumbers
 from phonenumbers import geocoder
 
 # ================= BASIC CONFIG =================
-BOT_TOKEN = "8363735598:AAHf_O4pCS9A6V0m175tf2YpZcmglfsNkNw"
+BOT_TOKEN = "8294446224:AAEVBGLnx0KigNEOSAHQ4Psb70YYp7Qi938"
 CHANNEL_ID = -1003406789899
 ADMIN_ID = 8449115253
 
