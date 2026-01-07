@@ -7,7 +7,7 @@ import pycountry
 from bs4 import BeautifulSoup
 
 # ================== CONFIG ==================
-BOT_TOKEN = "8294446224:AAEVBGLnx0KigNEOSAHQ4Psb70YYp7Qi938"
+BOT_TOKEN = "8294446224:AAEE8Q9Z-B4mIYRnk_59SxsXinXUduOHuF8"
 ADMIN_ID = 8449115253
 CHANNEL_ID = -1003406789899
 
