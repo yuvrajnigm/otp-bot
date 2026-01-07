@@ -4,6 +4,9 @@ import json
 import os
 import re
 import time
+import threading
+from datetime import datetime, timedelta
+from flask import Flask
 from telegram import Bot
 import phonenumbers
 from phonenumbers import geocoder
@@ -21,14 +24,23 @@ APIS = [
     ("DGROUP", "http://51.77.216.195/crapi/dgroup/viewstats", API_TOKEN_2),
 ]
 
-FETCH_INTERVAL = 10
+FETCH_INTERVAL = 12
 RECORDS = 5
 CACHE_FILE = "sent_cache.json"
-OTP_TTL = 86400  # 24 hours
+OTP_TTL = 86400
+
+SELF_PING_URL = os.getenv("SELF_PING_URL")
+SELF_PING_INTERVAL = 300  # 5 min
 
 bot = Bot(token=BOT_TOKEN)
+bot.delete_webhook(drop_pending_updates=True)
+
+app = Flask(__name__)
 START_TIME = time.time()
-LAST_UPDATE_ID = 0
+
+# ================= STATS =================
+sent_today = 0
+last_report_date = datetime.utcnow().date()
 
 # ================= CACHE =================
 sent_cache = {}
@@ -39,12 +51,7 @@ if os.path.exists(CACHE_FILE):
         sent_cache = {}
 
 def save_cache():
-    with open(CACHE_FILE, "w") as f:
-        json.dump(sent_cache, f)
-
-def clear_cache():
-    sent_cache.clear()
-    save_cache()
+    json.dump(sent_cache, open(CACHE_FILE, "w"))
 
 def cleanup_cache():
     now = time.time()
@@ -60,123 +67,125 @@ def country_details(number):
         country = geocoder.description_for_number(num, "en")
         code = phonenumbers.region_code_for_number(num)
         flag = "".join(chr(127397 + ord(c)) for c in code)
-        return country, code, flag
+        return country, flag
     except:
-        return "Unknown", "XX", "🏳️"
+        return "Unknown", "🏳️"
 
 # ================= SERVICE =================
 def detect_service(cli, msg):
-    text = (cli + msg).lower()
-    if "whatsapp" in text:
-        return "WhatsApp", "🟢", "🔔🔔🔔"
-    if "facebook" in text:
-        return "Facebook", "🔵", "🚨🚨🚨"
-    if "google" in text:
-        return "Google", "🟡", "🔥🔥🔥"
-    return cli.upper(), "📩", "🔔🔔🔔"
+    t = (cli + msg).lower()
+    if "whatsapp" in t: return "WhatsApp", "🟢"
+    if "facebook" in t: return "Facebook", "🔵"
+    if "google" in t: return "Google", "🟡"
+    return cli.upper(), "📩"
 
 def extract_otp(msg):
     m = re.search(r"\b\d{3}[- ]?\d{3}\b|\b\d{4,8}\b", msg)
     return m.group() if m else "N/A"
 
-# ================= FORMAT =================
 def format_message(d):
-    country, code, flag = country_details(d["num"])
-    service, semoji, anim = detect_service(d["cli"], d["message"])
+    country, flag = country_details(d["num"])
+    service, emoji = detect_service(d["cli"], d["message"])
     otp = extract_otp(d["message"])
-
     return f"""
-{anim} {flag} {country.upper()} OTP ALERT {flag} {anim}
+🔔 {flag} {country} OTP ALERT 🔔
 
-{semoji} {service} OTP RECEIVED {semoji}
-
-🕰 Time: {d['dt']}
+{emoji} Service: {service}
 📞 Number: +{d['num'][:4]}****{d['num'][-4:]}
 🔑 OTP: `{otp}`
 
-━━━━━━━━━━━━━━━━━━
 👑 Owner: 💗 Yuvraj 💗
-🏷️ #{country.replace(" ", "")} #{service}OTP
-━━━━━━━━━━━━━━━━━━
 """.strip()
 
-# ================= API FETCH =================
-async def fetch_api(session, url, token):
+# ================= KEEP ALIVE =================
+@app.route("/")
+def home():
+    return "Bot Alive"
+
+@app.route("/health")
+def health():
+    return {"status": "ok", "cache": len(sent_cache)}
+
+# ================= ALERT =================
+async def send_crash_alert(error):
     try:
-        async with session.get(
-            url,
-            params={"token": token, "records": RECORDS},
-            timeout=aiohttp.ClientTimeout(total=20),
-        ) as r:
-            if r.status != 200:
-                return []
-            data = await r.json()
-            return data.get("data", [])
-    except Exception as e:
-        print("API ERROR:", e)
-        return []
+        await bot.send_message(
+            ADMIN_ID,
+            f"🚨 OTP BOT ERROR ALERT 🚨\n"
+            f"⏰ Time: {datetime.utcnow()}\n"
+            f"❌ Error: {error}\n"
+            f"🖥 Platform: Render"
+        )
+    except:
+        pass
 
-# ================= ADMIN COMMANDS =================
-async def check_admin_commands():
-    global LAST_UPDATE_ID
-    updates = await bot.get_updates(offset=LAST_UPDATE_ID + 1, timeout=0)
-
-    for u in updates:
-        LAST_UPDATE_ID = u.update_id
-
-        if not u.message or u.message.chat_id != ADMIN_ID:
-            continue
-
-        text = u.message.text.strip()
-
-        if text == "/status":
+# ================= DAILY REPORT =================
+async def daily_report():
+    global sent_today, last_report_date
+    while True:
+        await asyncio.sleep(60)
+        now = datetime.utcnow()
+        if now.date() != last_report_date:
             uptime = int(time.time() - START_TIME)
             h, m = divmod(uptime // 60, 60)
-            msg = (
-                "✅ OTP Bot Online\n"
-                f"⏱ Uptime: {h}h {m}m\n"
-                f"📊 Cached OTPs: {len(sent_cache)}\n"
-                f"🔁 Fetch interval: {FETCH_INTERVAL} sec\n"
-                "🟢 Platform: Railway"
-            )
-            await bot.send_message(ADMIN_ID, msg)
-
-        elif text == "/clearcache":
-            clear_cache()
             await bot.send_message(
                 ADMIN_ID,
-                "🧹 Cache Cleared Successfully!\n"
-                f"📊 Cached OTPs: {len(sent_cache)}"
+                f"📊 DAILY OTP REPORT\n"
+                f"📅 Date: {last_report_date}\n"
+                f"📨 OTPs Sent: {sent_today}\n"
+                f"📦 Cache Size: {len(sent_cache)}\n"
+                f"⏱ Uptime: {h}h {m}m\n"
+                f"🟢 Status: Online"
             )
+            sent_today = 0
+            last_report_date = now.date()
 
-# ================= WORKER =================
-async def worker():
-    print("🚀 OTP BOT STARTED (Railway Worker)")
+# ================= SELF PING =================
+async def self_ping():
+    if not SELF_PING_URL:
+        return
+    async with aiohttp.ClientSession() as session:
+        while True:
+            try:
+                await session.get(SELF_PING_URL + "/health", timeout=10)
+            except:
+                pass
+            await asyncio.sleep(SELF_PING_INTERVAL)
+
+# ================= OTP WORKER =================
+async def otp_worker():
+    global sent_today
     async with aiohttp.ClientSession() as session:
         while True:
             try:
                 cleanup_cache()
-                await check_admin_commands()
-
                 for _, url, token in APIS:
-                    records = await fetch_api(session, url, token)
-                    for d in records:
-                        uid = d["dt"] + d["num"] + d["message"]
-                        if uid in sent_cache:
+                    async with session.get(url, params={"token": token, "records": RECORDS}, timeout=20) as r:
+                        if r.status != 200:
                             continue
-                        sent_cache[uid] = time.time()
-                        save_cache()
-                        await bot.send_message(
-                            chat_id=CHANNEL_ID,
-                            text=format_message(d),
-                            parse_mode="Markdown",
-                        )
-
+                        data = (await r.json()).get("data", [])
+                        for d in data:
+                            uid = d["dt"] + d["num"] + d["message"]
+                            if uid in sent_cache:
+                                continue
+                            sent_cache[uid] = time.time()
+                            save_cache()
+                            sent_today += 1
+                            bot.send_message(CHANNEL_ID, format_message(d))
                 await asyncio.sleep(FETCH_INTERVAL)
             except Exception as e:
-                print("SAFE LOOP ERROR:", e)
+                await send_crash_alert(e)
                 await asyncio.sleep(5)
 
 # ================= START =================
+def start_async():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.create_task(otp_worker())
+    loop.create_task(self_ping())
+    loop.create_task(daily_report())
+    loop.run_forever()
+
 if __name__ == "__main__":
-    asyncio.run(worker())
+    threading.Thread(target=start_async, daemon=True).start()
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
