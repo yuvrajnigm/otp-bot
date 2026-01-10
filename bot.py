@@ -1,11 +1,10 @@
-import asyncio
-import aiohttp
+import time
 import json
 import os
 import re
-import time
-from datetime import datetime
 import threading
+import requests
+from datetime import datetime
 
 from telegram import Bot
 from flask import Flask, jsonify
@@ -14,7 +13,7 @@ import phonenumbers
 import pycountry
 from bs4 import BeautifulSoup
 
-# ================= CONFIG (HARD CODED) =================
+# ================= CONFIG =================
 BOT_TOKEN = "8294446224:AAEE8Q9Z-B4mIYRnk_59SxsXinXUduOHuF8"
 ADMIN_ID = 8449115253
 CHANNEL_ID = -1003406789899
@@ -25,7 +24,6 @@ DGROUP_API_TOKEN = "Q1JVQjRSQop9hmhHepdUdUl_hYpblXZ4VHOWQoBTi3pfimxgeG-Q"
 FETCH_INTERVAL = 10
 CACHE_FILE = "sent_cache.json"
 
-# ======================================================
 bot = Bot(BOT_TOKEN)
 START_TIME = time.time()
 sent_cache = set()
@@ -70,18 +68,6 @@ def detect_service(text):
         return "Google", "🟡"
     return "Unknown", "⚪"
 
-# ================= DGROUP PARSER =================
-def parse_dgroup(raw):
-    otp = re.search(r"\b\d{4,8}\b", raw)
-    num = re.search(r"\+?\d{8,15}", raw)
-    service, emoji = detect_service(raw)
-    return (
-        otp.group() if otp else None,
-        num.group() if num else None,
-        service,
-        emoji
-    )
-
 # ================= FLASK KEEP ALIVE =================
 app = Flask(__name__)
 
@@ -97,7 +83,7 @@ def run_flask():
     app.run(host="0.0.0.0", port=10000)
 
 # ================= COMMAND LISTENER =================
-async def command_listener():
+def command_listener():
     offset = None
     while True:
         updates = bot.get_updates(offset=offset, timeout=30)
@@ -111,7 +97,7 @@ async def command_listener():
             text = u.message.text.strip()
 
             if text == "/start":
-                await bot.send_message(chat_id, "🤖 OTP Bot is running ✅")
+                bot.send_message(chat_id, "🤖 OTP Bot is running ✅")
                 continue
 
             if chat_id != ADMIN_ID:
@@ -120,7 +106,7 @@ async def command_listener():
             if text == "/status":
                 uptime = int(time.time() - START_TIME)
                 h, m = divmod(uptime // 60, 60)
-                await bot.send_message(
+                bot.send_message(
                     ADMIN_ID,
                     f"✅ OTP Bot Online\n"
                     f"⏱ Uptime: {h}h {m}m\n"
@@ -130,78 +116,78 @@ async def command_listener():
             if text == "/clearcache":
                 sent_cache.clear()
                 save_cache()
-                await bot.send_message(ADMIN_ID, "🧹 Cache cleared")
+                bot.send_message(ADMIN_ID, "🧹 Cache cleared")
 
-        await asyncio.sleep(1)
+        time.sleep(1)
 
 # ================= OTP WORKER =================
-async def otp_worker():
-    async with aiohttp.ClientSession() as session:
-        while True:
-            try:
-                # ---------- HADI ----------
-                url = f"http://147.135.212.197/crapi/had/viewstats?token={HADI_API_TOKEN}&records=5"
-                async with session.get(url, timeout=15) as r:
-                    if "json" in r.headers.get("content-type", ""):
-                        data = await r.json()
-                        for d in data.get("data", []):
-                            uid = d["dt"] + d["num"]
-                            if uid in sent_cache:
-                                continue
-                            sent_cache.add(uid)
-                            save_cache()
+def otp_worker():
+    while True:
+        try:
+            # -------- HADI --------
+            url = f"http://147.135.212.197/crapi/had/viewstats?token={HADI_API_TOKEN}&records=5"
+            r = requests.get(url, timeout=15)
+            if r.headers.get("content-type", "").startswith("application/json"):
+                data = r.json()
+                for d in data.get("data", []):
+                    uid = d["dt"] + d["num"]
+                    if uid in sent_cache:
+                        continue
 
-                            otp = re.search(r"\d{4,8}", d["message"])
-                            if not otp:
-                                continue
+                    otp_match = re.search(r"\d{4,8}", d["message"])
+                    if not otp_match:
+                        continue
 
-                            number = "+" + d["num"]
-                            country, flag = country_flag(number)
-                            service, emoji = detect_service(d["message"])
+                    sent_cache.add(uid)
+                    save_cache()
 
-                            await bot.send_message(
-                                CHANNEL_ID,
-                                f"🔔 {flag} New {country} {service} OTP!\n"
-                                f"🕰 Time: {d['dt']}\n"
-                                f"📞 Number: {mask_number(number)}\n"
-                                f"🔑 OTP: {otp.group()}\n"
-                                f"Powered By 😈 Yuvraj 😈"
-                            )
+                    number = "+" + d["num"]
+                    country, flag = country_flag(number)
+                    service, emoji = detect_service(d["message"])
 
-                # ---------- DGROUP ----------
-                durl = f"http://51.77.216.195/crapi/dgroup/viewstats?token={DGROUP_API_TOKEN}&records=1"
-                async with session.get(durl, timeout=15) as r:
-                    raw = await r.text()
-                    otp, num, service, emoji = parse_dgroup(raw)
-                    if otp and num:
-                        uid = num + otp
-                        if uid not in sent_cache:
-                            sent_cache.add(uid)
-                            save_cache()
+                    bot.send_message(
+                        CHANNEL_ID,
+                        f"🔔 {flag} New {country} {service} OTP!\n"
+                        f"🕰 Time: {d['dt']}\n"
+                        f"📞 Number: {mask_number(number)}\n"
+                        f"🔑 OTP: {otp_match.group()}\n\n"
+                        f"Powered By 😈 Yuvraj 😈"
+                    )
 
-                            country, flag = country_flag(num)
+            # -------- DGROUP --------
+            durl = f"http://51.77.216.195/crapi/dgroup/viewstats?token={DGROUP_API_TOKEN}&records=1"
+            html = requests.get(durl, timeout=15).text
+            soup = BeautifulSoup(html, "html.parser")
+            text = soup.get_text(" ")
 
-                            await bot.send_message(
-                                CHANNEL_ID,
-                                f"🔔 {flag} New {country} {service} OTP!\n"
-                                f"🕰 Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-                                f"📞 Number: {mask_number(num)}\n"
-                                f"🔑 OTP: {otp}\n"
-                                f"Powered By 😈 Yuvraj 😈"
-                            )
+            otp = re.search(r"\b\d{4,8}\b", text)
+            num = re.search(r"\+?\d{8,15}", text)
 
-            except Exception as e:
-                print("OTP ERROR:", e)
+            if otp and num:
+                uid = num.group() + otp.group()
+                if uid not in sent_cache:
+                    sent_cache.add(uid)
+                    save_cache()
 
-            await asyncio.sleep(FETCH_INTERVAL)
+                    country, flag = country_flag(num.group())
+                    service, emoji = detect_service(text)
+
+                    bot.send_message(
+                        CHANNEL_ID,
+                        f"🔔 {flag} New {country} {service} OTP!\n"
+                        f"🕰 Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                        f"📞 Number: {mask_number(num.group())}\n"
+                        f"🔑 OTP: {otp.group()}\n\n"
+                        f"Powered By 😈 Yuvraj 😈"
+                    )
+
+        except Exception as e:
+            print("OTP ERROR:", e)
+
+        time.sleep(FETCH_INTERVAL)
 
 # ================= MAIN =================
-async def main():
-    await asyncio.gather(
-        command_listener(),
-        otp_worker()
-    )
-
 if __name__ == "__main__":
     threading.Thread(target=run_flask, daemon=True).start()
-    asyncio.run(main())
+    threading.Thread(target=command_listener, daemon=True).start()
+    otp_worker()
