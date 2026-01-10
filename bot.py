@@ -4,10 +4,9 @@ from telegram import Bot
 from flask import Flask, jsonify
 import phonenumbers
 from phonenumbers import geocoder
-from bs4 import BeautifulSoup
 
 # ================= CONFIG =================
-BOT_TOKEN = "8294446224:AAEE8Q9Z-B4mIYRnk_59SxsXinXUduOHuF8"
+BOT_TOKEN = "8294446224:AAEVBGLnx0KigNEOSAHQ4Psb70YYp7Qi938"
 ADMIN_ID = 8449115253
 CHANNEL_ID = -1003406789899
 
@@ -31,44 +30,37 @@ if os.path.exists(CACHE_FILE):
 def save_cache():
     json.dump(list(sent_cache), open(CACHE_FILE, "w"))
 
-# ================= COUNTRY + FLAG =================
-def detect_country(number):
+# ================= COUNTRY + NUMBER =================
+def detect_country_and_mask(number: str):
     try:
         if not number.startswith("+"):
             number = "+" + number
 
         p = phonenumbers.parse(number, None)
-        country = geocoder.description_for_number(p, "en")
+        country = geocoder.description_for_number(p, "en") or "Unknown"
         region = phonenumbers.region_code_for_number(p)
         flag = "".join(chr(127397 + ord(c)) for c in region)
-        formatted = f"+{p.country_code} {p.national_number}"
-        return country or "Unknown", flag, formatted
+
+        national = str(p.national_number)
+        masked = national[:2] + "****" + national[-4:]
+        masked_number = f"+{p.country_code} {masked}"
+
+        return country, flag, masked_number
     except:
         return "Unknown", "🏳️", number
 
-# ================= SERVICE =================
-def detect_service(text):
+# ================= SERVICE + EMOJI =================
+def detect_service_and_emoji(text: str):
     t = text.lower()
-    if "telegram" in t: return "Telegram"
-    if "whatsapp" in t: return "WhatsApp"
-    if "facebook" in t: return "Facebook"
-    if "google" in t or "gmail" in t: return "Google"
-    return "Unknown"
-
-# ================= DGROUP HTML =================
-def parse_dgroup_html(html):
-    soup = BeautifulSoup(html, "html.parser")
-    text = soup.get_text(" ")
-
-    otp = re.search(r"\b\d{4,8}\b", text)
-    num = re.search(r"\b\d{9,15}\b", text)
-
-    return (
-        otp.group() if otp else None,
-        num.group() if num else None,
-        detect_service(text),
-        text.strip()
-    )
+    if "whatsapp" in t:
+        return "WhatsApp", "🟢📲"
+    if "telegram" in t:
+        return "Telegram", "🔵✈️"
+    if "facebook" in t:
+        return "Facebook", "🔵📘"
+    if "google" in t or "gmail" in t:
+        return "Google", "🔴🔐"
+    return "Unknown", "📩"
 
 # ================= FLASK =================
 app = Flask(__name__)
@@ -105,7 +97,9 @@ async def command_listener():
                 h, m = divmod(up // 60, 60)
                 await bot.send_message(
                     ADMIN_ID,
-                    f"✅ OTP Bot Online\n⏱ Uptime: {h}h {m}m\n📦 Cached: {len(sent_cache)}"
+                    f"✅ OTP Bot Online\n"
+                    f"⏱ Uptime: {h}h {m}m\n"
+                    f"📦 Cached OTPs: {len(sent_cache)}"
                 )
 
             if text == "/clearcache":
@@ -121,57 +115,81 @@ async def otp_worker():
         while True:
             try:
                 # ===== HADI =====
-                url = f"http://147.135.212.197/crapi/had/viewstats?token={HADI_API_TOKEN}&records=5"
-                async with session.get(url, timeout=15) as r:
+                hurl = f"http://147.135.212.197/crapi/had/viewstats?token={HADI_API_TOKEN}&records=5"
+                async with session.get(hurl, timeout=15) as r:
                     if "json" in r.headers.get("content-type",""):
                         data = await r.json()
                         for d in data.get("data", []):
-                            otp = re.search(r"\d{4,8}", d["message"])
-                            if not otp: continue
+                            raw = d.get("message","")
+                            otp_match = re.search(r"\d{4,8}", raw)
+                            if not otp_match:
+                                continue
 
-                            uid = d["num"] + otp.group()
-                            if uid in sent_cache: continue
-                            sent_cache.add(uid); save_cache()
+                            num = d.get("num","")
+                            uid = num + otp_match.group()
+                            if uid in sent_cache:
+                                continue
 
-                            country, flag, number = detect_country(d["num"])
-                            service = detect_service(d["message"])
-                            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            sent_cache.add(uid)
+                            save_cache()
+
+                            country, flag, masked = detect_country_and_mask(num)
+                            service, emoji = detect_service_and_emoji(raw)
+                            now = d.get("dt", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
                             await bot.send_message(
                                 CHANNEL_ID,
                                 f"🔔 {flag} New {country} {service} OTP!\n\n"
+                                f"{emoji} Service: {service}\n"
                                 f"🕰 Time: {now}\n"
                                 f"🌍 Country: {country} {flag}\n"
-                                f"🟢 Service: {service}\n"
-                                f"📞 Number: {number}\n"
-                                f"🔑 OTP: {otp.group()}\n\n"
-                                f"📩 Full Message:\n{d['message']}\n\n"
+                                f"📞 Number: {masked}\n"
+                                f"🔑 OTP: {otp_match.group()}\n\n"
+                                f"📩 Full Message:\n{raw}\n\n"
                                 f"Powered By 😈 Yuvraj 😈"
                             )
 
-                # ===== DGROUP =====
+                # ===== DGROUP (JSON CLEAN) =====
                 durl = f"http://51.77.216.195/crapi/dgroup/viewstats?token={DGROUP_API_TOKEN}&records=1"
                 async with session.get(durl, timeout=15) as r:
-                    html = await r.text()
-                    otp, num, service, full = parse_dgroup_html(html)
-                    if otp and num:
-                        uid = num + otp
-                        if uid not in sent_cache:
-                            sent_cache.add(uid); save_cache()
-                            country, flag, number = detect_country(num)
-                            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    if "json" not in r.headers.get("content-type",""):
+                        continue
 
-                            await bot.send_message(
-                                CHANNEL_ID,
-                                f"🔔 {flag} New {country} {service} OTP!\n\n"
-                                f"🕰 Time: {now}\n"
-                                f"🌍 Country: {country} {flag}\n"
-                                f"🟢 Service: {service}\n"
-                                f"📞 Number: {number}\n"
-                                f"🔑 OTP: {otp}\n\n"
-                                f"📩 Full Message:\n{full}\n\n"
-                                f"Powered By 😈 Yuvraj 😈"
-                            )
+                    data = await r.json()
+                    rows = data.get("data", [])
+                    if not rows:
+                        continue
+
+                    d = rows[0]
+                    raw = d.get("message","")
+                    otp_match = re.search(r"\d{4,8}", raw)
+                    if not otp_match:
+                        continue
+
+                    num = d.get("num","")
+                    uid = num + otp_match.group()
+                    if uid in sent_cache:
+                        continue
+
+                    sent_cache.add(uid)
+                    save_cache()
+
+                    country, flag, masked = detect_country_and_mask(num)
+                    service = d.get("cli","Unknown")
+                    emoji = "🟢📲" if service.lower()=="whatsapp" else "🔵✈️" if service.lower()=="telegram" else "📩"
+                    now = d.get("dt", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+
+                    await bot.send_message(
+                        CHANNEL_ID,
+                        f"🔔 {flag} New {country} {service} OTP!\n\n"
+                        f"{emoji} Service: {service}\n"
+                        f"🕰 Time: {now}\n"
+                        f"🌍 Country: {country} {flag}\n"
+                        f"📞 Number: {masked}\n"
+                        f"🔑 OTP: {otp_match.group()}\n\n"
+                        f"📩 Full Message:\n{raw}\n\n"
+                        f"Powered By 😈 Yuvraj 😈"
+                    )
 
             except Exception as e:
                 print("OTP ERROR:", e)
