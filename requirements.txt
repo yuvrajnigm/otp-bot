@@ -1,6 +1,8 @@
 python-telegram-bot==13.15
+requests
 aiohttp
 flask
 phonenumbers
 pycountry
 beautifulsoup4
+lxml
