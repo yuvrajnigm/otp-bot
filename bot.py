@@ -14,7 +14,7 @@ import phonenumbers
 from phonenumbers import geocoder
 
 # ================= CONFIG =================
-BOT_TOKEN = "8294446224:AAEE8Q9Z-B4mIYRnk_59SxsXinXUduOHuF8"
+BOT_TOKEN = "8294446224:AAEWqQTMNzHr88VK8GwcGR_iXBeqNQ7ZIoo"
 ADMIN_ID = 8449115253
 CHANNEL_ID = -1003406789899
 
@@ -24,11 +24,14 @@ HADI_TOKEN = "R1NYQjRSQkF8cm5Dak-QWmFpmHZ0i4ZjQoxzdItykoh4lnVHfXZX"
 DGROUP_API = "http://51.77.216.195/crapi/dgroup/viewstats"
 DGROUP_TOKEN = "Q1JVQjRSQop9hmhHepdUdUl_hYpblXZ4VHOWQoBTi3pfimxgeG-Q"
 
+RX_API = "http://51.77.216.195/crapi/rx/viewstats"
+RX_TOKEN = "QldXSDRSQlaDYWFDSm2DWGSOWHZ8hW9-hlGTe2ptZXxgmIBjaox1"
+
 FETCH_INTERVAL = 10
 CACHE_FILE = "sent_cache.json"
 START_TIME = time.time()
 
-# ================= GLOBAL STATS =================
+# ================= STATS =================
 TOTAL_OTPS_SENT = 0
 LAST_REPORT_DATE = None
 
@@ -60,13 +63,11 @@ def get_country_and_flag(number):
         parsed = phonenumbers.parse(number)
         country = geocoder.description_for_number(parsed, "en")
         region = phonenumbers.region_code_for_number(parsed)
-
         if region:
             base = 127462 - ord("A")
             flag = chr(base + ord(region[0])) + chr(base + ord(region[1]))
         else:
             flag = "🌍"
-
         return country or "Unknown", flag
     except:
         return "Unknown", "🌍"
@@ -74,8 +75,6 @@ def get_country_and_flag(number):
 def mask_number(number):
     if not number.startswith("+"):
         number = "+" + number
-    if len(number) < 10:
-        return number
     return number[:5] + "*" * (len(number) - 9) + number[-4:]
 
 def detect_service(text):
@@ -91,103 +90,61 @@ def detect_service(text):
     return "Unknown", "❓"
 
 # ================= ALERTS =================
-def send_crash_alert(error_text):
+def send_crash_alert(err):
     try:
         bot.send_message(
             ADMIN_ID,
             f"🚨 OTP BOT CRASH ALERT 🚨\n\n"
-            f"⏰ Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-            f"❌ Error:\n{error_text}\n\n"
-            f"🛠 Bot auto-recovering…"
+            f"⏰ {datetime.now()}\n"
+            f"❌ Error:\n{err}\n\n"
+            f"Bot auto-recovering…"
         )
     except:
         pass
 
 def send_daily_report():
     global TOTAL_OTPS_SENT, LAST_REPORT_DATE
-
     today = datetime.now().date()
     if LAST_REPORT_DATE == today:
         return
-
     uptime = int(time.time() - START_TIME)
     h, m = divmod(uptime // 60, 60)
-
-    report = (
+    bot.send_message(
+        ADMIN_ID,
         f"📊 DAILY OTP REPORT 📊\n\n"
         f"📅 Date: {today}\n"
-        f"📨 OTPs Sent Today: {TOTAL_OTPS_SENT}\n"
+        f"📨 OTPs Sent: {TOTAL_OTPS_SENT}\n"
         f"📦 Cache Size: {len(sent_cache)}\n"
-        f"⏱ Uptime: {h}h {m}m\n"
-        f"🤖 Status: Stable ✅\n\n"
+        f"⏱ Uptime: {h}h {m}m\n\n"
         f"Powered By 😈 Yuvraj 😈"
     )
-
-    try:
-        bot.send_message(ADMIN_ID, report)
-    except:
-        pass
-
     TOTAL_OTPS_SENT = 0
     LAST_REPORT_DATE = today
 
-# ================= COMMANDS =================
-def start_cmd(update: Update, context: CallbackContext):
-    update.message.reply_text("🤖 OTP Bot is ONLINE ✅")
-
-def status_cmd(update: Update, context: CallbackContext):
-    if update.effective_user.id != ADMIN_ID:
-        return
-    up = int(time.time() - START_TIME)
-    h, m = divmod(up // 60, 60)
-    update.message.reply_text(
-        f"✅ OTP Bot Online\n"
-        f"⏱ Uptime: {h}h {m}m\n"
-        f"📦 Cached OTPs: {len(sent_cache)}"
-    )
-
-def clearcache_cmd(update: Update, context: CallbackContext):
-    if update.effective_user.id != ADMIN_ID:
-        return
-    sent_cache.clear()
-    save_cache()
-    update.message.reply_text("🧹 Cache cleared")
-
 # ================= OTP WORKER =================
-def otp_worker():
+def handle_json_api(api_url, token):
     global TOTAL_OTPS_SENT
+    r = requests.get(api_url, params={"token": token, "records": 5}, timeout=15)
+    data = r.json().get("data", [])
+    for d in data:
+        uid = d["dt"] + d["num"]
+        if uid in sent_cache:
+            continue
+        otp = extract_otp(d["message"])
+        if otp == "N/A":
+            continue
+        sent_cache.add(uid)
+        save_cache()
 
-    while True:
-        try:
-            # ---------- HADI ----------
-            r = requests.get(
-                HADI_API,
-                params={"token": HADI_TOKEN, "records": 5},
-                timeout=15
-            )
-            data = r.json().get("data", [])
+        country, flag = get_country_and_flag(d["num"])
+        service, emoji = detect_service(d["message"])
 
-            for d in data:
-                uid = d["dt"] + d["num"]
-                if uid in sent_cache:
-                    continue
-
-                otp = extract_otp(d["message"])
-                if otp == "N/A":
-                    continue
-
-                sent_cache.add(uid)
-                save_cache()
-
-                country, flag = get_country_and_flag(d["num"])
-                service, semoji = detect_service(d["message"])
-
-                msg = f"""
+        msg = f"""
 🔔 {flag} New {country} {service} OTP!
 
 🕰 Time: {d['dt']}
 🌍 Country: {country} {flag}
-{semoji} Service: {service}
+{emoji} Service: {service}
 📞 Number: {mask_number(d['num'])}
 🔑 OTP: {otp}
 
@@ -196,54 +153,18 @@ def otp_worker():
 
 Powered By 😈 Yuvraj 😈
 """
-                bot.send_message(CHANNEL_ID, msg)
-                TOTAL_OTPS_SENT += 1
+        bot.send_message(CHANNEL_ID, msg)
+        TOTAL_OTPS_SENT += 1
 
-            # ---------- DGROUP ----------
-            r2 = requests.get(
-                DGROUP_API,
-                params={"token": DGROUP_TOKEN, "records": 1},
-                timeout=15
-            )
-            text = r2.text
-
-            otp = extract_otp(text)
-            num_match = re.search(r'\+?\d{10,15}', text)
-
-            if otp != "N/A" and num_match:
-                number = num_match.group(0).replace("+", "")
-                uid = number + otp
-
-                if uid not in sent_cache:
-                    sent_cache.add(uid)
-                    save_cache()
-
-                    country, flag = get_country_and_flag(number)
-                    service, semoji = detect_service(text)
-
-                    msg = f"""
-🔔 {flag} New {country} {service} OTP!
-
-🕰 Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-🌍 Country: {country} {flag}
-{semoji} Service: {service}
-📞 Number: {mask_number(number)}
-🔑 OTP: {otp}
-
-📩 Full Message:
-{text.strip()}
-
-Powered By 😈 Yuvraj 😈
-"""
-                    bot.send_message(CHANNEL_ID, msg)
-                    TOTAL_OTPS_SENT += 1
-
+def otp_worker():
+    while True:
+        try:
+            handle_json_api(HADI_API, HADI_TOKEN)
+            handle_json_api(RX_API, RX_TOKEN)
             send_daily_report()
-
         except Exception as e:
             print("OTP ERROR:", e)
             send_crash_alert(str(e))
-
         time.sleep(FETCH_INTERVAL)
 
 # ================= FLASK =================
@@ -261,9 +182,9 @@ if __name__ == "__main__":
 
     updater = Updater(BOT_TOKEN, use_context=True)
     dp = updater.dispatcher
-    dp.add_handler(CommandHandler("start", start_cmd))
-    dp.add_handler(CommandHandler("status", status_cmd))
-    dp.add_handler(CommandHandler("clearcache", clearcache_cmd))
+    dp.add_handler(CommandHandler("start", lambda u,c: u.message.reply_text("🤖 OTP Bot Online ✅")))
+    dp.add_handler(CommandHandler("status", lambda u,c: u.message.reply_text(f"Uptime: {int(time.time()-START_TIME)}s")))
+    dp.add_handler(CommandHandler("clearcache", lambda u,c: (sent_cache.clear(), save_cache(), u.message.reply_text("Cache cleared"))))
 
     updater.start_polling()
     updater.idle()
