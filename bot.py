@@ -1,6 +1,11 @@
 # ================= IMPORTS =================
-import os, re, json, time, threading, requests
+import re
+import json
+import time
+import threading
+import requests
 from datetime import datetime
+
 from flask import Flask
 from telegram import Bot, Update
 from telegram.ext import Updater, CommandHandler, CallbackContext
@@ -21,98 +26,110 @@ DGROUP_TOKEN = "Q1JVQjRSQop9hmhHepdUdUl_hYpblXZ4VHOWQoBTi3pfimxgeG-Q"
 
 FETCH_INTERVAL = 10
 CACHE_FILE = "sent_cache.json"
-
 START_TIME = time.time()
 
-# ================= COUNTRY FLAGS (FULL MAP) =================
-COUNTRY_FLAGS = {
-    "Afghanistan": "🇦🇫", "Albania": "🇦🇱", "Algeria": "🇩🇿", "Argentina": "🇦🇷",
-    "Australia": "🇦🇺", "Austria": "🇦🇹", "Bangladesh": "🇧🇩", "Belgium": "🇧🇪",
-    "Brazil": "🇧🇷", "Canada": "🇨🇦", "China": "🇨🇳", "Colombia": "🇨🇴",
-    "Egypt": "🇪🇬", "France": "🇫🇷", "Germany": "🇩🇪", "India": "🇮🇳",
-    "Indonesia": "🇮🇩", "Iran": "🇮🇷", "Iraq": "🇮🇶", "Italy": "🇮🇹",
-    "Japan": "🇯🇵", "Kenya": "🇰🇪", "Kyrgyzstan": "🇰🇬", "Malaysia": "🇲🇾",
-    "Mexico": "🇲🇽", "Nepal": "🇳🇵", "Netherlands": "🇳🇱", "Nigeria": "🇳🇬",
-    "Pakistan": "🇵🇰", "Philippines": "🇵🇭", "Qatar": "🇶🇦", "Russia": "🇷🇺",
-    "Saudi Arabia": "🇸🇦", "Singapore": "🇸🇬", "South Africa": "🇿🇦",
-    "South Korea": "🇰🇷", "Spain": "🇪🇸", "Sri Lanka": "🇱🇰",
-    "Thailand": "🇹🇭", "Turkey": "🇹🇷", "United Arab Emirates": "🇦🇪",
-    "United Kingdom": "🇬🇧", "United States": "🇺🇸", "Uzbekistan": "🇺🇿",
-    "Vietnam": "🇻🇳", "Yemen": "🇾🇪", "Zimbabwe": "🇿🇼",
-    "Unknown Country": "🏴‍☠️"
-}
+# ================= GLOBAL STATS =================
+TOTAL_OTPS_SENT = 0
+LAST_REPORT_DATE = None
 
-# ================= SERVICE KEYWORDS =================
-SERVICE_KEYWORDS = {
-    "WhatsApp": ["whatsapp"],
-    "Telegram": ["telegram"],
-    "Facebook": ["facebook"],
-    "Google": ["google", "gmail"],
-    "Instagram": ["instagram"],
-    "Amazon": ["amazon"],
-    "Netflix": ["netflix"],
-    "LinkedIn": ["linkedin"],
-    "Microsoft": ["microsoft", "outlook", "live.com"],
-    "Apple": ["apple", "icloud"],
-    "Twitter": ["twitter", "x"],
-    "Snapchat": ["snapchat"],
-    "TikTok": ["tiktok"],
-    "Discord": ["discord"],
-    "Signal": ["signal"],
-    "Viber": ["viber"],
-    "IMO": ["imo"],
-    "PayPal": ["paypal"],
-    "Binance": ["binance"],
-    "Uber": ["uber"],
-    "Yahoo": ["yahoo"],
-    "Unknown": []
-}
-
-# ================= SERVICE EMOJIS =================
-SERVICE_EMOJIS = {
-    "WhatsApp": "🟢", "Telegram": "📩", "Facebook": "📘", "Instagram": "📸",
-    "Google": "✉️", "Amazon": "🛒", "Netflix": "🎬", "LinkedIn": "💼",
-    "Microsoft": "🪟", "Apple": "🍏", "Twitter": "🐦", "Snapchat": "👻",
-    "TikTok": "🎵", "Discord": "🗨️", "Signal": "🔐", "Viber": "📞",
-    "IMO": "💬", "PayPal": "💰", "Binance": "🪙", "Uber": "🚗",
-    "Yahoo": "🟣", "Unknown": "❓"
-}
-
-# ================= INIT =================
+# ================= BOT =================
 bot = Bot(BOT_TOKEN)
 app = Flask(__name__)
 
 # ================= CACHE =================
-if os.path.exists(CACHE_FILE):
+try:
     sent_cache = set(json.load(open(CACHE_FILE)))
-else:
+except:
     sent_cache = set()
 
 def save_cache():
     json.dump(list(sent_cache), open(CACHE_FILE, "w"))
 
 # ================= HELPERS =================
+def extract_otp(message):
+    for pat in [r'\d{3}-\d{3}', r'\d{6}', r'\d{4}']:
+        m = re.search(pat, message)
+        if m:
+            return m.group(0)
+    return "N/A"
+
 def get_country_and_flag(number):
     try:
         if not number.startswith("+"):
             number = "+" + number
-        parsed = phonenumbers.parse(number, None)
+        parsed = phonenumbers.parse(number)
         country = geocoder.description_for_number(parsed, "en")
-        flag = COUNTRY_FLAGS.get(country, COUNTRY_FLAGS["Unknown Country"])
-        return country, flag
+        region = phonenumbers.region_code_for_number(parsed)
+
+        if region:
+            base = 127462 - ord("A")
+            flag = chr(base + ord(region[0])) + chr(base + ord(region[1]))
+        else:
+            flag = "🌍"
+
+        return country or "Unknown", flag
     except:
-        return "Unknown Country", COUNTRY_FLAGS["Unknown Country"]
+        return "Unknown", "🌍"
+
+def mask_number(number):
+    if not number.startswith("+"):
+        number = "+" + number
+    if len(number) < 10:
+        return number
+    return number[:5] + "*" * (len(number) - 9) + number[-4:]
 
 def detect_service(text):
     t = text.lower()
-    for service, keys in SERVICE_KEYWORDS.items():
-        for k in keys:
-            if k in t:
-                return service
-    return "Unknown"
+    if "whatsapp" in t:
+        return "WhatsApp", "🟢"
+    if "telegram" in t:
+        return "Telegram", "📩"
+    if "facebook" in t:
+        return "Facebook", "📘"
+    if "google" in t or "gmail" in t:
+        return "Google", "✉️"
+    return "Unknown", "❓"
 
-def mask_number(num):
-    return num[:4] + "****" + num[-4:]
+# ================= ALERTS =================
+def send_crash_alert(error_text):
+    try:
+        bot.send_message(
+            ADMIN_ID,
+            f"🚨 OTP BOT CRASH ALERT 🚨\n\n"
+            f"⏰ Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"❌ Error:\n{error_text}\n\n"
+            f"🛠 Bot auto-recovering…"
+        )
+    except:
+        pass
+
+def send_daily_report():
+    global TOTAL_OTPS_SENT, LAST_REPORT_DATE
+
+    today = datetime.now().date()
+    if LAST_REPORT_DATE == today:
+        return
+
+    uptime = int(time.time() - START_TIME)
+    h, m = divmod(uptime // 60, 60)
+
+    report = (
+        f"📊 DAILY OTP REPORT 📊\n\n"
+        f"📅 Date: {today}\n"
+        f"📨 OTPs Sent Today: {TOTAL_OTPS_SENT}\n"
+        f"📦 Cache Size: {len(sent_cache)}\n"
+        f"⏱ Uptime: {h}h {m}m\n"
+        f"🤖 Status: Stable ✅\n\n"
+        f"Powered By 😈 Yuvraj 😈"
+    )
+
+    try:
+        bot.send_message(ADMIN_ID, report)
+    except:
+        pass
+
+    TOTAL_OTPS_SENT = 0
+    LAST_REPORT_DATE = today
 
 # ================= COMMANDS =================
 def start_cmd(update: Update, context: CallbackContext):
@@ -124,7 +141,9 @@ def status_cmd(update: Update, context: CallbackContext):
     up = int(time.time() - START_TIME)
     h, m = divmod(up // 60, 60)
     update.message.reply_text(
-        f"✅ Bot Running\n⏱ Uptime: {h}h {m}m\n📦 Cached OTPs: {len(sent_cache)}"
+        f"✅ OTP Bot Online\n"
+        f"⏱ Uptime: {h}h {m}m\n"
+        f"📦 Cached OTPs: {len(sent_cache)}"
     )
 
 def clearcache_cmd(update: Update, context: CallbackContext):
@@ -132,13 +151,20 @@ def clearcache_cmd(update: Update, context: CallbackContext):
         return
     sent_cache.clear()
     save_cache()
-    update.message.reply_text("🧹 Cache Cleared")
+    update.message.reply_text("🧹 Cache cleared")
 
 # ================= OTP WORKER =================
 def otp_worker():
+    global TOTAL_OTPS_SENT
+
     while True:
         try:
-            r = requests.get(HADI_API, params={"token": HADI_TOKEN, "records": 5}, timeout=15)
+            # ---------- HADI ----------
+            r = requests.get(
+                HADI_API,
+                params={"token": HADI_TOKEN, "records": 5},
+                timeout=15
+            )
             data = r.json().get("data", [])
 
             for d in data:
@@ -146,26 +172,24 @@ def otp_worker():
                 if uid in sent_cache:
                     continue
 
-                otp_match = re.search(r"\d{4,8}", d["message"])
-                if not otp_match:
+                otp = extract_otp(d["message"])
+                if otp == "N/A":
                     continue
 
                 sent_cache.add(uid)
                 save_cache()
 
-                number = d["num"]
-                country, flag = get_country_and_flag(number)
-                service = detect_service(d["message"])
-                emoji = SERVICE_EMOJIS.get(service, "❓")
+                country, flag = get_country_and_flag(d["num"])
+                service, semoji = detect_service(d["message"])
 
                 msg = f"""
 🔔 {flag} New {country} {service} OTP!
 
 🕰 Time: {d['dt']}
 🌍 Country: {country} {flag}
-{emoji} Service: {service}
-📞 Number: +{mask_number(number)}
-🔑 OTP: {otp_match.group()}
+{semoji} Service: {service}
+📞 Number: {mask_number(d['num'])}
+🔑 OTP: {otp}
 
 📩 Full Message:
 {d['message']}
@@ -173,9 +197,52 @@ def otp_worker():
 Powered By 😈 Yuvraj 😈
 """
                 bot.send_message(CHANNEL_ID, msg)
+                TOTAL_OTPS_SENT += 1
+
+            # ---------- DGROUP ----------
+            r2 = requests.get(
+                DGROUP_API,
+                params={"token": DGROUP_TOKEN, "records": 1},
+                timeout=15
+            )
+            text = r2.text
+
+            otp = extract_otp(text)
+            num_match = re.search(r'\+?\d{10,15}', text)
+
+            if otp != "N/A" and num_match:
+                number = num_match.group(0).replace("+", "")
+                uid = number + otp
+
+                if uid not in sent_cache:
+                    sent_cache.add(uid)
+                    save_cache()
+
+                    country, flag = get_country_and_flag(number)
+                    service, semoji = detect_service(text)
+
+                    msg = f"""
+🔔 {flag} New {country} {service} OTP!
+
+🕰 Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+🌍 Country: {country} {flag}
+{semoji} Service: {service}
+📞 Number: {mask_number(number)}
+🔑 OTP: {otp}
+
+📩 Full Message:
+{text.strip()}
+
+Powered By 😈 Yuvraj 😈
+"""
+                    bot.send_message(CHANNEL_ID, msg)
+                    TOTAL_OTPS_SENT += 1
+
+            send_daily_report()
 
         except Exception as e:
             print("OTP ERROR:", e)
+            send_crash_alert(str(e))
 
         time.sleep(FETCH_INTERVAL)
 
@@ -197,5 +264,6 @@ if __name__ == "__main__":
     dp.add_handler(CommandHandler("start", start_cmd))
     dp.add_handler(CommandHandler("status", status_cmd))
     dp.add_handler(CommandHandler("clearcache", clearcache_cmd))
+
     updater.start_polling()
     updater.idle()
