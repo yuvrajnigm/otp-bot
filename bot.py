@@ -238,16 +238,14 @@ def otp_worker():
                     service, semoji = detect_service(d["message"])
 
                     send_all(
-                        f"📡 SOURCE: {SOURCE}\n"
-                        f"⏰ {d['dt']}\n"
-                        f"🌍 {country} {flag}\n"
-                        f"{semoji} {service}\n"
-                        f"📞 {mask_number(d['num'])}\n"
-                        f"🔑 OTP: {otp}\n\n"
-                        f"{d['message']}\n\n"
-                        f"Powered By 😈 Yuvraj 😈"
+    f"⏰ {d['dt']}\n"
+    f"🌍 {country} {flag}\n"
+    f"{semoji} {service}\n"
+    f"📞 {mask_number(d['num'])}\n"
+    f"🔑 OTP: {otp}\n\n"
+    f"{d['message']}\n\n"
+    f"Powered By 😈 Yuvraj 😈"
                     )
-
                     TOTAL_OTPS_SENT += 1
 
         except Exception as e:
