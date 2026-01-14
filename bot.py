@@ -15,7 +15,7 @@ import phonenumbers
 from phonenumbers import geocoder
 
 # ================= CONFIG =================
-BOT_TOKEN = "8294446224:AAHUucfzpRqSqjbpPJ7k96cXQLpUbkEHp9w"
+BOT_TOKEN = "8191040733:AAEUWrRCLf0HmxWbcv1t73go5DsWwP38lEg"
 ADMIN_ID = 8449115253
 DEFAULT_CHANNEL = -1003406789899
 
