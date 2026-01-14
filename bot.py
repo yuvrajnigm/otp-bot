@@ -4,8 +4,10 @@ import json
 import time
 import threading
 import requests
+import os
 from datetime import datetime
 
+from flask import Flask
 from telegram import Bot, Update
 from telegram.ext import Updater, CommandHandler, CallbackContext
 
@@ -32,6 +34,18 @@ START_TIME = time.time()
 # ================= GLOBAL =================
 bot = Bot(BOT_TOKEN)
 TOTAL_OTPS_SENT = 0
+LAST_REPORT_DATE = None
+
+# ================= FLASK (PORT FIX) =================
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "BOT ALIVE"
+
+def run_flask():
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
 
 # ================= CACHE =================
 try:
@@ -98,6 +112,13 @@ def send_all(text):
         except:
             pass
 
+# ================= ALERT =================
+def crash_alert(err):
+    bot.send_message(
+        ADMIN_ID,
+        f"🚨 BOT ERROR 🚨\n\n{datetime.now()}\n\n{err}"
+    )
+
 # ================= COMMANDS =================
 def start_cmd(update: Update, ctx: CallbackContext):
     if update.effective_user.id == ADMIN_ID:
@@ -143,10 +164,23 @@ def dgroup_test_cmd(update, ctx):
             params={"token": DGROUP_TOKEN, "records": 3},
             timeout=10
         )
-        update.message.reply_text(
-            "🧪 DGROUP RAW RESPONSE:\n\n" +
-            json.dumps(r.json(), indent=2)[:3500]
-        )
+
+        if not r.text.strip():
+            update.message.reply_text("⚠️ DGROUP API returned EMPTY response")
+            return
+
+        try:
+            data = r.json()
+            update.message.reply_text(
+                "🧪 DGROUP RAW RESPONSE:\n\n" +
+                json.dumps(data, indent=2)[:3500]
+            )
+        except:
+            update.message.reply_text(
+                "⚠️ DGROUP NON-JSON RESPONSE:\n\n" +
+                r.text[:3500]
+            )
+
     except Exception as e:
         update.message.reply_text(f"❌ DGROUP ERROR:\n{e}")
 
@@ -217,12 +251,13 @@ def otp_worker():
                     TOTAL_OTPS_SENT += 1
 
         except Exception as e:
-            bot.send_message(ADMIN_ID, f"🚨 ERROR:\n{e}")
+            crash_alert(str(e))
 
         time.sleep(FETCH_INTERVAL)
 
 # ================= MAIN =================
 if __name__ == "__main__":
+    threading.Thread(target=run_flask, daemon=True).start()
     threading.Thread(target=otp_worker, daemon=True).start()
 
     updater = Updater(BOT_TOKEN, use_context=True)
