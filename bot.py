@@ -25,7 +25,7 @@ HADI_TOKEN = "R1NYQjRSQkF8cm5Dak-QWmFpmHZ0i4ZjQoxzdItykoh4lnVHfXZX"
 DGROUP_API = "http://51.77.216.195/crapi/dgroup/viewstats"
 DGROUP_TOKEN = "Q1JVQjRSQop9hmhHepdUdUl_hYpblXZ4VHOWQoBTi3pfimxgeG-Q"
 
-FETCH_INTERVAL = 10
+FETCH_INTERVAL = 20   # rate-limit safe
 CACHE_FILE = "sent_cache.json"
 CHAT_FILE = "chats.json"
 
@@ -34,7 +34,6 @@ START_TIME = time.time()
 # ================= GLOBAL =================
 bot = Bot(BOT_TOKEN)
 TOTAL_OTPS_SENT = 0
-LAST_REPORT_DATE = None
 
 # ================= FLASK (PORT FIX) =================
 app = Flask(__name__)
@@ -45,7 +44,7 @@ def home():
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    app.run("0.0.0.0", port)
 
 # ================= CACHE =================
 try:
@@ -67,7 +66,7 @@ def save_chats():
 
 # ================= HELPERS =================
 def extract_otp(text):
-    for p in [r'\d{3}-\d{3}', r'\d{6}', r'\d{4}']:
+    for p in [r'\d{6}', r'\d{4}', r'\d{3}-\d{3}']:
         m = re.search(p, text)
         if m:
             return m.group()
@@ -83,7 +82,7 @@ def detect_service(text):
         return "Facebook", "📘"
     if "google" in t or "gmail" in t:
         return "Google", "✉️"
-    return "Unknown", "❓"
+    return "Service", "🔐"
 
 def get_country_flag(number):
     try:
@@ -112,20 +111,14 @@ def send_all(text):
         except:
             pass
 
-# ================= ALERT =================
-def crash_alert(err):
-    bot.send_message(
-        ADMIN_ID,
-        f"🚨 BOT ERROR 🚨\n\n{datetime.now()}\n\n{err}"
-    )
-
 # ================= COMMANDS =================
 def start_cmd(update: Update, ctx: CallbackContext):
     if update.effective_user.id == ADMIN_ID:
         update.message.reply_text(
-            "👑 Welcome Admin\n\n"
+            "👑 Admin Panel\n\n"
             "/status\n/apistatus\n/dgroup_test\n"
-            "/clearcache\n/add_chat <id>\n/remove_chat <id>\n/list_chats"
+            "/add_chat <id>\n/remove_chat <id>\n/list_chats\n"
+            "/clearcache"
         )
     else:
         update.message.reply_text("🤖 OTP Bot ONLINE ✅")
@@ -145,51 +138,34 @@ def apistatus_cmd(update, ctx):
     msg = "📡 API STATUS\n\n"
     try:
         requests.get(HADI_API, params={"token": HADI_TOKEN}, timeout=5)
-        msg += "🟢 HADI API: ONLINE\n"
+        msg += "🟢 HADI API\n"
     except:
-        msg += "🔴 HADI API: OFFLINE\n"
+        msg += "🔴 HADI API\n"
     try:
         requests.get(DGROUP_API, params={"token": DGROUP_TOKEN}, timeout=5)
-        msg += "🟢 DGROUP API: ONLINE\n"
+        msg += "🟢 DGROUP API\n"
     except:
-        msg += "🔴 DGROUP API: OFFLINE\n"
+        msg += "🔴 DGROUP API\n"
     update.message.reply_text(msg)
 
 def dgroup_test_cmd(update, ctx):
     if update.effective_user.id != ADMIN_ID:
         return
-    try:
-        r = requests.get(
-            DGROUP_API,
-            params={"token": DGROUP_TOKEN, "records": 3},
-            timeout=10
-        )
-
-        if not r.text.strip():
-            update.message.reply_text("⚠️ DGROUP API returned EMPTY response")
-            return
-
-        try:
-            data = r.json()
-            update.message.reply_text(
-                "🧪 DGROUP RAW RESPONSE:\n\n" +
-                json.dumps(data, indent=2)[:3500]
-            )
-        except:
-            update.message.reply_text(
-                "⚠️ DGROUP NON-JSON RESPONSE:\n\n" +
-                r.text[:3500]
-            )
-
-    except Exception as e:
-        update.message.reply_text(f"❌ DGROUP ERROR:\n{e}")
+    r = requests.get(DGROUP_API, params={"token": DGROUP_TOKEN, "records": 2}, timeout=10)
+    if "too many times" in r.text.lower():
+        update.message.reply_text("⚠️ DGROUP RATE LIMIT (wait 5 sec)")
+        return
+    if not r.text.strip().startswith("{"):
+        update.message.reply_text("⚠️ DGROUP NON-JSON RESPONSE\n\n" + r.text[:1000])
+        return
+    update.message.reply_text(json.dumps(r.json(), indent=2)[:3500])
 
 def clearcache_cmd(update, ctx):
     if update.effective_user.id != ADMIN_ID:
         return
     sent_cache.clear()
     save_cache()
-    update.message.reply_text("🧹 Cache cleared")
+    update.message.reply_text("🧹 Cache Cleared")
 
 def add_chat_cmd(update, ctx):
     if update.effective_user.id != ADMIN_ID:
@@ -214,16 +190,18 @@ def list_chats_cmd(update, ctx):
 
 # ================= OTP WORKER =================
 def otp_worker():
-    global TOTAL_OTPS_SENT
     while True:
         try:
-            for API, TOKEN, SOURCE in [
-                (HADI_API, HADI_TOKEN, "HADI"),
-                (DGROUP_API, DGROUP_TOKEN, "DGROUP")
+            for API, TOKEN in [
+                (HADI_API, HADI_TOKEN),
+                (DGROUP_API, DGROUP_TOKEN)
             ]:
                 r = requests.get(API, params={"token": TOKEN, "records": 5}, timeout=15)
+                if not r.text.strip().startswith("{"):
+                    continue
+
                 for d in r.json().get("data", []):
-                    uid = SOURCE + d["dt"] + d["num"]
+                    uid = d["dt"] + d["num"]
                     if uid in sent_cache:
                         continue
 
@@ -238,18 +216,16 @@ def otp_worker():
                     service, semoji = detect_service(d["message"])
 
                     send_all(
-    f"⏰ {d['dt']}\n"
-    f"🌍 {country} {flag}\n"
-    f"{semoji} {service}\n"
-    f"📞 {mask_number(d['num'])}\n"
-    f"🔑 OTP: {otp}\n\n"
-    f"{d['message']}\n\n"
-    f"Powered By 😈 Yuvraj 😈"
+                        f"⏰ {d['dt']}\n"
+                        f"🌍 {country} {flag}\n"
+                        f"{semoji} {service}\n"
+                        f"📞 {mask_number(d['num'])}\n"
+                        f"🔑 OTP: {otp}\n\n"
+                        f"{d['message']}\n\n"
+                        f"Powered By 😈 Yuvraj 😈"
                     )
-                    TOTAL_OTPS_SENT += 1
-
-        except Exception as e:
-            crash_alert(str(e))
+        except:
+            pass
 
         time.sleep(FETCH_INTERVAL)
 
@@ -265,10 +241,10 @@ if __name__ == "__main__":
     dp.add_handler(CommandHandler("status", status_cmd))
     dp.add_handler(CommandHandler("apistatus", apistatus_cmd))
     dp.add_handler(CommandHandler("dgroup_test", dgroup_test_cmd))
-    dp.add_handler(CommandHandler("clearcache", clearcache_cmd))
     dp.add_handler(CommandHandler("add_chat", add_chat_cmd))
     dp.add_handler(CommandHandler("remove_chat", remove_chat_cmd))
     dp.add_handler(CommandHandler("list_chats", list_chats_cmd))
+    dp.add_handler(CommandHandler("clearcache", clearcache_cmd))
 
     updater.start_polling()
     updater.idle()
