@@ -6,7 +6,6 @@ import threading
 import requests
 from datetime import datetime
 
-from flask import Flask
 from telegram import Bot, Update
 from telegram.ext import Updater, CommandHandler, CallbackContext
 
@@ -14,7 +13,7 @@ import phonenumbers
 from phonenumbers import geocoder
 
 # ================= CONFIG =================
-BOT_TOKEN = "8294446224:AAGd600eB3gPTg9Icw_ckEJR8qZ4DPh5sJ0"
+BOT_TOKEN = "8294446224:AAHUucfzpRqSqjbpPJ7k96cXQLpUbkEHp9w"
 ADMIN_ID = 8449115253
 DEFAULT_CHANNEL = -1003406789899
 
@@ -32,10 +31,7 @@ START_TIME = time.time()
 
 # ================= GLOBAL =================
 bot = Bot(BOT_TOKEN)
-app = Flask(__name__)
-
 TOTAL_OTPS_SENT = 0
-LAST_REPORT_DATE = None
 
 # ================= CACHE =================
 try:
@@ -102,13 +98,6 @@ def send_all(text):
         except:
             pass
 
-# ================= ALERT =================
-def crash_alert(err):
-    bot.send_message(
-        ADMIN_ID,
-        f"🚨 BOT CRASH 🚨\n\n{datetime.now()}\n\n{err}"
-    )
-
 # ================= COMMANDS =================
 def start_cmd(update: Update, ctx: CallbackContext):
     if update.effective_user.id == ADMIN_ID:
@@ -118,7 +107,7 @@ def start_cmd(update: Update, ctx: CallbackContext):
             "/clearcache\n/add_chat <id>\n/remove_chat <id>\n/list_chats"
         )
     else:
-        update.message.reply_text("🤖 OTP Bot ONLINE")
+        update.message.reply_text("🤖 OTP Bot ONLINE ✅")
 
 def status_cmd(update, ctx):
     if update.effective_user.id != ADMIN_ID:
@@ -138,13 +127,11 @@ def apistatus_cmd(update, ctx):
         msg += "🟢 HADI API: ONLINE\n"
     except:
         msg += "🔴 HADI API: OFFLINE\n"
-
     try:
         requests.get(DGROUP_API, params={"token": DGROUP_TOKEN}, timeout=5)
         msg += "🟢 DGROUP API: ONLINE\n"
     except:
         msg += "🔴 DGROUP API: OFFLINE\n"
-
     update.message.reply_text(msg)
 
 def dgroup_test_cmd(update, ctx):
@@ -156,10 +143,9 @@ def dgroup_test_cmd(update, ctx):
             params={"token": DGROUP_TOKEN, "records": 3},
             timeout=10
         )
-        data = r.json()
         update.message.reply_text(
-            "🧪 DGROUP RAW RESPONSE:\n\n"
-            + json.dumps(data, indent=2)[:3500]
+            "🧪 DGROUP RAW RESPONSE:\n\n" +
+            json.dumps(r.json(), indent=2)[:3500]
         )
     except Exception as e:
         update.message.reply_text(f"❌ DGROUP ERROR:\n{e}")
@@ -231,21 +217,12 @@ def otp_worker():
                     TOTAL_OTPS_SENT += 1
 
         except Exception as e:
-            crash_alert(str(e))
+            bot.send_message(ADMIN_ID, f"🚨 ERROR:\n{e}")
 
         time.sleep(FETCH_INTERVAL)
 
-# ================= FLASK =================
-@app.route("/")
-def home():
-    return "BOT ALIVE"
-
-def run_flask():
-    app.run("0.0.0.0", 10000)
-
 # ================= MAIN =================
 if __name__ == "__main__":
-    threading.Thread(target=run_flask, daemon=True).start()
     threading.Thread(target=otp_worker, daemon=True).start()
 
     updater = Updater(BOT_TOKEN, use_context=True)
