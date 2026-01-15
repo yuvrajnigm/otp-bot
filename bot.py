@@ -1,202 +1,592 @@
-# ================= IMPORTS =================
+import os
 import re
 import json
-import time
+import asyncio
+import aiohttp
+import logging
 import threading
-import requests
-import os
-
 from flask import Flask
 from telegram import Bot, Update
-from telegram.ext import Updater, CommandHandler, CallbackContext
-
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 import phonenumbers
-from phonenumbers import geocoder
+import pycountry
+
+# ================= ENV =================
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHAT_ID = int(os.getenv("CHAT_ID"))
+ADMIN_ID = int(os.getenv("ADMIN_ID"))
+
+API_TOKEN_1 = os.getenv("API_TOKEN_1")
+API_TOKEN_2 = os.getenv("API_TOKEN_2")
+
+if not BOT_TOKEN or not API_TOKEN_1 or not API_TOKEN_2:
+    raise RuntimeError("❌ Missing ENV variables")
 
 # ================= CONFIG =================
-BOT_TOKEN = "8294446224:AAGdM4FNq54tFUjIg1deNUklbL1xyzXN4OY"
-ADMIN_ID = 8449115253
-DEFAULT_CHANNEL = -1003406789899
-
-HADI_API = "http://147.135.212.197/crapi/had/viewstats"
-HADI_TOKEN = "R1NYQjRSQkF8cm5Dak-QWmFpmHZ0i4ZjQoxzdItykoh4lnVHfXZX"
-
-DGROUP_API = "http://51.77.216.195/crapi/dgroup/viewstats"
-DGROUP_TOKEN = "Q1JVQjRSQop9hmhHepdUdUl_hYpblXZ4VHOWQoBTi3pfimxgeG-Q"
-
-HADI_INTERVAL = 10
-DGROUP_INTERVAL = 15   # balanced speed
+FETCH_INTERVAL = 10
+RECORD_LIMIT = 5
 
 CACHE_FILE = "sent_cache.json"
-CHAT_FILE = "chats.json"
+SOURCE_STATE_FILE = "source_state.json"
 
-# ================= GLOBAL =================
-bot = Bot(BOT_TOKEN)
+# ================= APIS =================
+APIS = [
+    {
+        "id": "Source 1",
+        "url": "http://147.135.212.197/crapi/had/viewstats",
+        "token": API_TOKEN_1,
+    },
+    {
+        "id": "Source 2",
+        "url": "http://51.77.216.195/crapi/dgroup/viewstats",
+        "token": API_TOKEN_2,
+    },
+]
 
-# ================= FLASK (PORT FIX) =================
+# ================= LOGGING =================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+log = logging.getLogger("OTP-BOT")
+
+bot = Bot(token=BOT_TOKEN)
+
+# ================= KEEP ALIVE =================
 app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "BOT ALIVE"
+    return "Bot running"
 
-def run_flask():
-    port = int(os.environ.get("PORT", 10000))
-    app.run("0.0.0.0", port)
+def run_web():
+    app.run(host="0.0.0.0", port=8080)
 
-# ================= CACHE =================
-try:
-    sent_cache = set(json.load(open(CACHE_FILE)))
-except:
-    sent_cache = set()
-
-def save_cache():
-    json.dump(list(sent_cache), open(CACHE_FILE, "w"))
-
-# ================= CHAT LIST =================
-try:
-    CHAT_IDS = set(json.load(open(CHAT_FILE)))
-except:
-    CHAT_IDS = {DEFAULT_CHANNEL}
-
-def save_chats():
-    json.dump(list(CHAT_IDS), open(CHAT_FILE, "w"))
+threading.Thread(target=run_web, daemon=True).start()
 
 # ================= HELPERS =================
-def extract_otp(text):
-    # longest OTP wins (Telegram / PayPal safe)
-    patterns = [r'\b\d{5,8}\b', r'\b\d{6}\b', r'\b\d{4}\b']
-    matches = []
-    for p in patterns:
-        matches += re.findall(p, text)
-    if not matches:
-        return None
-    return max(matches, key=len)
+def load_json(file, default):
+    if os.path.exists(file):
+        with open(file) as f:
+            return json.load(f)
+    return default
 
-def detect_service(text):
-    t = text.lower()
-    if "telegram" in t:
-        return "Telegram", "📩"
-    if "paypal" in t:
-        return "PayPal", "💰"
-    if "whatsapp" in t:
-        return "WhatsApp", "🟢"
-    if "google" in t or "gmail" in t:
-        return "Google", "✉️"
-    return "Service", "🔐"
+def save_json(file, data):
+    with open(file, "w") as f:
+        json.dump(data, f)
 
-def get_country_flag(number):
+def is_otp(msg):
+    return any(x in msg.lower() for x in ["otp", "code", "verification", "one time"])
+
+def extract_phone(text):
+    m = re.search(r"\+?\d{10,15}", text)
+    return m.group() if m else None
+
+def detect_country(phone):
     try:
-        if not number.startswith("+"):
-            number = "+" + number
-        p = phonenumbers.parse(number)
-        country = geocoder.description_for_number(p, "en")
-        region = phonenumbers.region_code_for_number(p)
-        if region:
-            base = 127462 - ord("A")
-            flag = chr(base + ord(region[0])) + chr(base + ord(region[1]))
-        else:
-            flag = "🌍"
-        return country or "Unknown", flag
+        num = phonenumbers.parse(phone, None)
+        region = phonenumbers.region_code_for_number(num)
+        country = pycountry.countries.get(alpha_2=region)
+        flag = "".join(chr(127397 + ord(c)) for c in region)
+        return flag, country.name if country else "Unknown"
     except:
-        return "Unknown", "🌍"
+        return "🏳️", "Unknown"
 
-def mask_number(num):
-    num = num.replace("+", "")
-    return "+" + num[:3] + "***" + num[-4:]
+# ================= API =================
+async def fetch_api(session, api):
+    async with session.get(
+        api["url"],
+        params={"token": api["token"], "records": RECORD_LIMIT},
+        timeout=20
+    ) as r:
+        if "application/json" not in r.headers.get("Content-Type", ""):
+            log.error(f"Non-JSON response from {api['id']}")
+            return api["id"], {}
+        return api["id"], await r.json()
 
-def send_all(text):
-    for cid in CHAT_IDS:
-        try:
-            bot.send_message(cid, text)
-        except:
-            pass
+# ================= OTP LOOP =================
+async def otp_loop():
+    sent = set(load_json(CACHE_FILE, []))
+    state = load_json(SOURCE_STATE_FILE, {"Source 1": True, "Source 2": True})
 
-# ================= HADI WORKER =================
-def hadi_worker():
-    while True:
-        try:
-            r = requests.get(HADI_API, params={"token": HADI_TOKEN, "records": 3}, timeout=15)
-            if not r.text.strip().startswith("{"):
-                time.sleep(HADI_INTERVAL)
-                continue
+    async with aiohttp.ClientSession() as session:
+        while True:
+            try:
+                rows = []
 
-            for d in r.json().get("data", []):
-                uid = "H" + d["dt"] + d["num"]
-                if uid in sent_cache:
-                    continue
+                for api in APIS:
+                    if not state.get(api["id"], True):
+                        continue
 
-                otp = extract_otp(d["message"])
-                if not otp:
-                    continue
+                    src, data = await fetch_api(session, api)
 
-                sent_cache.add(uid)
-                save_cache()
+                    if data.get("status") == "success":
+                        for r in data.get("data", []):
+                            r["_src"] = src
+                            rows.append(r)
 
-                country, flag = get_country_flag(d["num"])
-                service, semoji = detect_service(d["message"])
+                if rows:
+                    latest = max(rows, key=lambda x: x["dt"])
+                    uid = f"{latest['dt']}_{latest['num']}"
 
-                send_all(
-                    f"⏰ {d['dt']}\n"
-                    f"🌍 {country} {flag}\n"
-                    f"{semoji} {service}\n"
-                    f"📞 {mask_number(d['num'])}\n"
-                    f"🔑 OTP: {otp}\n\n"
-                    f"ℹ️ Message hidden for safety\n"
-                    f"Powered By 😈 Yuvraj 😈"
-                )
+                    if uid not in sent:
+                        msg = latest.get("message", "")
+                        if is_otp(msg):
+                            phone = extract_phone(msg) or latest["num"]
+                            flag, country = detect_country(phone)
 
-        except:
-            pass
+                            text = (
+                                "📩 *NEW OTP*\n\n"
+                                f"{flag} *Country:* {country}\n"
+                                f"📞 *Number:* `{phone}`\n"
+                                f"🕒 *Time:* `{latest['dt']}`\n"
+                                f"🔗 *Source:* {latest['_src']}\n\n"
+                                f"💬 {msg}"
+                            )
 
-        time.sleep(HADI_INTERVAL)
+                            await bot.send_message(
+                                chat_id=CHAT_ID,
+                                text=text,
+                                parse_mode="Markdown",
+                            )
 
-# ================= DGROUP WORKER =================
-def dgroup_worker():
-    while True:
-        try:
-            r = requests.get(DGROUP_API, params={"token": DGROUP_TOKEN, "records": 3}, timeout=15)
-            if not r.text.strip().startswith("{"):
-                time.sleep(5)
-                continue
+                            sent.add(uid)
+                            save_json(CACHE_FILE, list(sent))
 
-            for d in r.json().get("data", []):
-                uid = "D" + d["dt"] + d["num"]
-                if uid in sent_cache:
-                    continue
+            except Exception as e:
+                log.error("OTP loop error", exc_info=e)
 
-                otp = extract_otp(d["message"])
-                if not otp:
-                    continue
+            await asyncio.sleep(FETCH_INTERVAL)
 
-                sent_cache.add(uid)
-                save_cache()
+# ================= COMMANDS =================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🤖 *Bot is Alive!*\n\n"
+        "Commands:\n"
+        "/admin - Admin Panel",
+        parse_mode="Markdown",
+    )
 
-                country, flag = get_country_flag(d["num"])
-                service, semoji = detect_service(d["message"])
+def admin_only(update: Update):
+    return update.effective_user.id == ADMIN_ID
 
-                send_all(
-                    f"⏰ {d['dt']}\n"
-                    f"🌍 {country} {flag}\n"
-                    f"{semoji} {service}\n"
-                    f"📞 {mask_number(d['num'])}\n"
-                    f"🔑 OTP: {otp}\n\n"
-                    f"ℹ️ Message hidden for safety\n"
-                    f"Powered By 😈 Yuvraj 😈"
-                )
+async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not admin_only(update):
+        return
 
-        except:
-            pass
+    st = load_json(SOURCE_STATE_FILE, {"Source 1": True, "Source 2": True})
+    await update.message.reply_text(
+        "🛠 *Admin Panel*\n\n"
+        f"Source 1: {'ON ✅' if st['Source 1'] else 'OFF ❌'}\n"
+        f"Source 2: {'ON ✅' if st['Source 2'] else 'OFF ❌'}\n\n"
+        "/source1_on  /source1_off\n"
+        "/source2_on  /source2_off",
+        parse_mode="Markdown",
+    )
 
-        time.sleep(DGROUP_INTERVAL)
+async def toggle(update: Update, src: str, val: bool):
+    if not admin_only(update):
+        return
+    st = load_json(SOURCE_STATE_FILE, {})
+    st[src] = val
+    save_json(SOURCE_STATE_FILE, st)
+    await update.message.reply_text(f"{src} {'ON ✅' if val else 'OFF ❌'}")
+
+# ================= ERROR HANDLER =================
+async def error_handler(update, context):
+    log.error("Unhandled exception", exc_info=context.error)
+    try:
+        await context.bot.send_message(
+            chat_id=ADMIN_ID,
+            text=f"⚠️ Bot Error:\n{context.error}",
+        )
+    except:
+        pass
 
 # ================= MAIN =================
-if __name__ == "__main__":
-    threading.Thread(target=run_flask, daemon=True).start()
-    threading.Thread(target=hadi_worker, daemon=True).start()
-    threading.Thread(target=dgroup_worker, daemon=True).start()
+def start_otp_background():
+    asyncio.run(otp_loop())
 
-    updater = Updater(BOT_TOKEN, use_context=True)
-    updater.dispatcher.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("🤖 OTP Bot ONLINE ✅")))
-    updater.start_polling()
-    updater.idle()
+def main():
+    application = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("admin", admin))
+    application.add_handler(CommandHandler("source1_on", lambda u, c: toggle(u, "Source 1", True)))
+    application.add_handler(CommandHandler("source1_off", lambda u, c: toggle(u, "Source 1", False)))
+    application.add_handler(CommandHandler("source2_on", lambda u, c: toggle(u, "Source 2", True)))
+    application.add_handler(CommandHandler("source2_off", lambda u, c: toggle(u, "Source 2", False)))
+
+    application.add_error_handler(error_handler)
+
+    threading.Thread(target=start_otp_background, daemon=True).start()
+    application.run_polling()
+
+if __name__ == "__main__":
+    main()
+
+# ================= OTP LOOP =================
+async def otp_loop():
+    sent = set(load_json(CACHE_FILE, []))
+    state = load_json(SOURCE_STATE_FILE, {"Source 1": True, "Source 2": True})
+
+    async with aiohttp.ClientSession() as session:
+        while True:
+            try:
+                rows = []
+
+                for api in APIS:
+                    if not state.get(api["id"], True):
+                        continue
+
+                    src, data = await fetch_api(session, api)
+
+                    if data.get("status") == "success":
+                        for r in data.get("data", []):
+                            r["_src"] = src
+                            rows.append(r)
+
+                if rows:
+                    latest = max(rows, key=lambda x: x["dt"])
+                    uid = f"{latest['dt']}_{latest['num']}"
+
+                    if uid not in sent:
+                        msg = latest.get("message", "")
+                        if is_otp(msg):
+                            phone = extract_phone(msg) or latest["num"]
+                            flag, country = detect_country(phone)
+
+                            text = (
+                                "📩 *NEW OTP*\n\n"
+                                f"{flag} *Country:* {country}\n"
+                                f"📞 *Number:* `{phone}`\n"
+                                f"🕒 *Time:* `{latest['dt']}`\n"
+                                f"🔗 *Source:* {latest['_src']}\n\n"
+                                f"💬 {msg}"
+                            )
+
+                            await bot.send_message(
+                                chat_id=CHAT_ID,
+                                text=text,
+                                parse_mode="Markdown",
+                            )
+
+                            sent.add(uid)
+                            save_json(CACHE_FILE, list(sent))
+
+            except Exception as e:
+                log.error("OTP loop error", exc_info=e)
+
+            await asyncio.sleep(FETCH_INTERVAL)
+
+# ================= COMMANDS =================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🤖 *Bot is Alive!*\n\n"
+        "Commands:\n"
+        "/admin - Admin Panel",
+        parse_mode="Markdown",
+    )
+
+def admin_only(update: Update):
+    return update.effective_user.id == ADMIN_ID
+
+async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not admin_only(update):
+        return
+
+    st = load_json(SOURCE_STATE_FILE, {"Source 1": True, "Source 2": True})
+    await update.message.reply_text(
+        "🛠 *Admin Panel*\n\n"
+        f"Source 1: {'ON ✅' if st['Source 1'] else 'OFF ❌'}\n"
+        f"Source 2: {'ON ✅' if st['Source 2'] else 'OFF ❌'}\n\n"
+        "/source1_on  /source1_off\n"
+        "/source2_on  /source2_off",
+        parse_mode="Markdown",
+    )
+
+async def toggle(update: Update, src: str, val: bool):
+    if not admin_only(update):
+        return
+    st = load_json(SOURCE_STATE_FILE, {})
+    st[src] = val
+    save_json(SOURCE_STATE_FILE, st)
+    await update.message.reply_text(f"{src} {'ON ✅' if val else 'OFF ❌'}")
+
+# ================= ERROR HANDLER =================
+async def error_handler(update, context):
+    log.error("Unhandled exception", exc_info=context.error)
+    try:
+        await context.bot.send_message(
+            chat_id=ADMIN_ID,
+            text=f"⚠️ Bot Error:\n{context.error}",
+        )
+    except:
+        pass
+
+# ================= MAIN =================
+def start_otp_background():
+    asyncio.run(otp_loop())
+
+def main():
+    application = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("admin", admin))
+    application.add_handler(CommandHandler("source1_on", lambda u, c: toggle(u, "Source 1", True)))
+    application.add_handler(CommandHandler("source1_off", lambda u, c: toggle(u, "Source 1", False)))
+    application.add_handler(CommandHandler("source2_on", lambda u, c: toggle(u, "Source 2", True)))
+    application.add_handler(CommandHandler("source2_off", lambda u, c: toggle(u, "Source 2", False)))
+
+    application.add_error_handler(error_handler)
+
+    threading.Thread(target=start_otp_background, daemon=True).start()
+    application.run_polling()
+
+if __name__ == "__main__":
+    main()
+            return api["id"], {}
+        return api["id"], await r.json()
+
+# ================= OTP LOOP =================
+async def otp_loop():
+    sent = set(load_json(CACHE_FILE, []))
+    state = load_json(SOURCE_STATE_FILE, {"Source 1": True, "Source 2": True})
+
+    async with aiohttp.ClientSession() as session:
+        while True:
+            try:
+                rows = []
+
+                for api in APIS:
+                    if not state.get(api["id"], True):
+                        continue
+
+                    src, data = await fetch_api(session, api)
+
+                    if data.get("status") == "success":
+                        for r in data.get("data", []):
+                            r["_src"] = src
+                            rows.append(r)
+
+                if rows:
+                    latest = max(rows, key=lambda x: x["dt"])
+                    uid = f"{latest['dt']}_{latest['num']}"
+
+                    if uid not in sent:
+                        msg = latest.get("message", "")
+                        if is_otp(msg):
+                            phone = extract_phone(msg) or latest["num"]
+                            flag, country = detect_country(phone)
+
+                            text = (
+                                "📩 *NEW OTP*\n\n"
+                                f"{flag} *Country:* {country}\n"
+                                f"📞 *Number:* `{phone}`\n"
+                                f"🕒 *Time:* `{latest['dt']}`\n"
+                                f"🔗 *Source:* {latest['_src']}\n\n"
+                                f"💬 {msg}"
+                            )
+
+                            await bot.send_message(
+                                chat_id=CHAT_ID,
+                                text=text,
+                                parse_mode="Markdown"
+                            )
+
+                            sent.add(uid)
+                            save_json(CACHE_FILE, list(sent))
+
+            except Exception as e:
+                log.error("OTP loop error", exc_info=e)
+
+            await asyncio.sleep(FETCH_INTERVAL)
+
+# ================= COMMANDS =================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🤖 *Bot is Alive!*\n\n"
+        "Commands:\n"
+        "/admin - Admin Panel",
+        parse_mode="Markdown"
+    )
+
+def admin_only(update: Update):
+    return update.effective_user.id == ADMIN_ID
+
+async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not admin_only(update):
+        return
+
+    st = load_json(SOURCE_STATE_FILE, {"Source 1": True, "Source 2": True})
+    await update.message.reply_text(
+        "🛠 *Admin Panel*\n\n"
+        f"Source 1: {'ON ✅' if st['Source 1'] else 'OFF ❌'}\n"
+        f"Source 2: {'ON ✅' if st['Source 2'] else 'OFF ❌'}\n\n"
+        "/source1_on  /source1_off\n"
+        "/source2_on  /source2_off",
+        parse_mode="Markdown"
+    )
+
+async def toggle(update: Update, src: str, val: bool):
+    if not admin_only(update):
+        return
+    st = load_json(SOURCE_STATE_FILE, {})
+    st[src] = val
+    save_json(SOURCE_STATE_FILE, st)
+    await update.message.reply_text(f"{src} {'ON ✅' if val else 'OFF ❌'}")
+
+# ================= ERROR HANDLER =================
+async def error_handler(update, context):
+    log.error("Unhandled exception", exc_info=context.error)
+    try:
+        await context.bot.send_message(
+            chat_id=ADMIN_ID,
+            text=f"⚠️ Bot Error:\n{context.error}"
+        )
+    except:
+        pass
+
+# ================= MAIN =================
+def start_otp_background():
+    asyncio.run(otp_loop())
+
+def main():
+    application = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("admin", admin))
+    application.add_handler(CommandHandler("source1_on", lambda u, c: toggle(u, "Source 1", True)))
+    application.add_handler(CommandHandler("source1_off", lambda u, c: toggle(u, "Source 1", False)))
+    application.add_handler(CommandHandler("source2_on", lambda u, c: toggle(u, "Source 2", True)))
+    application.add_handler(CommandHandler("source2_off", lambda u, c: toggle(u, "Source 2", False)))
+
+    application.add_error_handler(error_handler)
+
+    threading.Thread(target=start_otp_background, daemon=True).start()
+    application.run_polling()
+
+if __name__ == "__main__":
+    main()
+    ) as r:
+        if "application/json" not in r.headers.get("Content-Type", ""):
+            log.error(f"Non-JSON response from {api['id']}")
+            return api["id"], {}
+        return api["id"], await r.json()
+
+# ================= OTP LOOP =================
+async def otp_loop():
+    sent = set(load_json(CACHE_FILE, []))
+    state = load_json(SOURCE_STATE_FILE, {"Source 1": True, "Source 2": True})
+
+    async with aiohttp.ClientSession() as session:
+        while True:
+            try:
+                rows = []
+
+                for api in APIS:
+                    if not state.get(api["id"], True):
+                        continue
+
+                    src, data = await fetch_api(session, api)
+
+                    if data.get("status") == "success":
+                        for r in data.get("data", []):
+                            r["_src"] = src
+                            rows.append(r)
+
+                if rows:
+                    latest = max(rows, key=lambda x: x["dt"])
+                    uid = f"{latest['dt']}_{latest['num']}"
+
+                    if uid not in sent:
+                        msg = latest.get("message", "")
+                        if is_otp(msg):
+                            phone = extract_phone(msg) or latest["num"]
+                            flag, country = detect_country(phone)
+
+                            text = (
+                                "📩 *NEW OTP*\n\n"
+                                f"{flag} *Country:* {country}\n"
+                                f"📞 *Number:* `{phone}`\n"
+                                f"🕒 *Time:* `{latest['dt']}`\n"
+                                f"🔗 *Source:* {latest['_src']}\n\n"
+                                f"💬 {msg}"
+                            )
+
+                            await bot.send_message(
+                                chat_id=CHAT_ID,
+                                text=text,
+                                parse_mode="Markdown",
+                            )
+
+                            sent.add(uid)
+                            save_json(CACHE_FILE, list(sent))
+
+            except Exception as e:
+                log.error("OTP loop error", exc_info=e)
+
+            await asyncio.sleep(FETCH_INTERVAL)
+
+# ================= ADMIN =================
+def admin_only(update: Update):
+    return update.effective_user.id == ADMIN_ID
+
+async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not admin_only(update):
+        return
+
+    st = load_json(SOURCE_STATE_FILE, {"Source 1": True, "Source 2": True})
+    await update.message.reply_text(
+        "🛠 *Admin Panel*\n\n"
+        f"Source 1: {'ON ✅' if st['Source 1'] else 'OFF ❌'}\n"
+        f"Source 2: {'ON ✅' if st['Source 2'] else 'OFF ❌'}\n\n"
+        "/source1_on /source1_off\n"
+        "/source2_on /source2_off",
+        parse_mode="Markdown",
+    )
+
+async def toggle(update: Update, src: str, val: bool):
+    if not admin_only(update):
+        return
+    st = load_json(SOURCE_STATE_FILE, {})
+    st[src] = val
+    save_json(SOURCE_STATE_FILE, st)
+    await update.message.reply_text(f"{src} {'ON ✅' if val else 'OFF ❌'}")
+
+# ================= ERROR HANDLER (FIX) =================
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    log.error("Unhandled exception", exc_info=context.error)
+    try:
+        await context.bot.send_message(
+            chat_id=ADMIN_ID,
+            text=f"⚠️ *Bot Error:*\n`{context.error}`",
+            parse_mode="Markdown",
+        )
+    except:
+        pass
+
+# ================= MAIN =================
+def start_otp_background():
+    asyncio.run(otp_loop())
+
+def main():
+    application = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    application.add_handler(CommandHandler("admin", admin))
+    application.add_handler(CommandHandler("source1_on", lambda u, c: toggle(u, "Source 1", True)))
+    application.add_handler(CommandHandler("source1_off", lambda u, c: toggle(u, "Source 1", False)))
+    application.add_handler(CommandHandler("source2_on", lambda u, c: toggle(u, "Source 2", True)))
+    application.add_handler(CommandHandler("source2_off", lambda u, c: toggle(u, "Source 2", False)))
+
+    # ✅ Register error handler
+    application.add_error_handler(error_handler)
+
+    # 🔥 OTP loop in background thread
+    threading.Thread(target=start_otp_background, daemon=True).start()
+
+    application.run_polling()
+
+if __name__ == "__main__":
+    main()
