@@ -5,7 +5,6 @@ import time
 import threading
 import requests
 import os
-from datetime import datetime
 
 from flask import Flask
 from telegram import Bot, Update
@@ -15,7 +14,7 @@ import phonenumbers
 from phonenumbers import geocoder
 
 # ================= CONFIG =================
-BOT_TOKEN = "8294446224:AAGqnRG7M6mtjumsWjaG3ZYqSMW7cgfgdbI"
+BOT_TOKEN = "8294446224:AAHUucfzpRqSqjbpPJ7k96cXQLpUbkEHp9w"
 ADMIN_ID = 8449115253
 DEFAULT_CHANNEL = -1003406789899
 
@@ -26,17 +25,15 @@ DGROUP_API = "http://51.77.216.195/crapi/dgroup/viewstats"
 DGROUP_TOKEN = "Q1JVQjRSQop9hmhHepdUdUl_hYpblXZ4VHOWQoBTi3pfimxgeG-Q"
 
 HADI_INTERVAL = 10
-DGROUP_INTERVAL = 30   # ⬅️ VERY IMPORTANT (slow)
+DGROUP_INTERVAL = 15   # balanced speed
 
 CACHE_FILE = "sent_cache.json"
 CHAT_FILE = "chats.json"
 
-START_TIME = time.time()
-
 # ================= GLOBAL =================
 bot = Bot(BOT_TOKEN)
 
-# ================= FLASK (PORT) =================
+# ================= FLASK (PORT FIX) =================
 app = Flask(__name__)
 
 @app.route("/")
@@ -67,20 +64,23 @@ def save_chats():
 
 # ================= HELPERS =================
 def extract_otp(text):
-    for p in [r'\d{6}', r'\d{4}', r'\d{3}-\d{3}']:
-        m = re.search(p, text)
-        if m:
-            return m.group()
-    return None
+    # longest OTP wins (Telegram / PayPal safe)
+    patterns = [r'\b\d{5,8}\b', r'\b\d{6}\b', r'\b\d{4}\b']
+    matches = []
+    for p in patterns:
+        matches += re.findall(p, text)
+    if not matches:
+        return None
+    return max(matches, key=len)
 
 def detect_service(text):
     t = text.lower()
-    if "whatsapp" in t:
-        return "WhatsApp", "🟢"
     if "telegram" in t:
         return "Telegram", "📩"
-    if "facebook" in t:
-        return "Facebook", "📘"
+    if "paypal" in t:
+        return "PayPal", "💰"
+    if "whatsapp" in t:
+        return "WhatsApp", "🟢"
     if "google" in t or "gmail" in t:
         return "Google", "✉️"
     return "Service", "🔐"
@@ -112,15 +112,11 @@ def send_all(text):
         except:
             pass
 
-# ================= COMMANDS =================
-def start_cmd(update: Update, ctx: CallbackContext):
-    update.message.reply_text("🤖 OTP Bot ONLINE ✅")
-
 # ================= HADI WORKER =================
 def hadi_worker():
     while True:
         try:
-            r = requests.get(HADI_API, params={"token": HADI_TOKEN, "records": 5}, timeout=15)
+            r = requests.get(HADI_API, params={"token": HADI_TOKEN, "records": 3}, timeout=15)
             if not r.text.strip().startswith("{"):
                 time.sleep(HADI_INTERVAL)
                 continue
@@ -146,7 +142,8 @@ def hadi_worker():
                     f"{semoji} {service}\n"
                     f"📞 {mask_number(d['num'])}\n"
                     f"🔑 OTP: {otp}\n\n"
-                    f"{d['message']}"
+                    f"ℹ️ Message hidden for safety\n"
+                    f"Powered By 😈 Yuvraj 😈"
                 )
 
         except:
@@ -154,19 +151,13 @@ def hadi_worker():
 
         time.sleep(HADI_INTERVAL)
 
-# ================= DGROUP WORKER (SAFE) =================
+# ================= DGROUP WORKER =================
 def dgroup_worker():
     while True:
         try:
-            r = requests.get(
-                DGROUP_API,
-                params={"token": DGROUP_TOKEN, "records": 5},
-                timeout=15
-            )
-
-            # ⛔ RATE LIMIT / NON JSON
+            r = requests.get(DGROUP_API, params={"token": DGROUP_TOKEN, "records": 3}, timeout=15)
             if not r.text.strip().startswith("{"):
-                time.sleep(6)   # ⬅️ backoff
+                time.sleep(5)
                 continue
 
             for d in r.json().get("data", []):
@@ -190,7 +181,8 @@ def dgroup_worker():
                     f"{semoji} {service}\n"
                     f"📞 {mask_number(d['num'])}\n"
                     f"🔑 OTP: {otp}\n\n"
-                    f"{d['message']}"
+                    f"ℹ️ Message hidden for safety\n"
+                    f"Powered By 😈 Yuvraj 😈"
                 )
 
         except:
@@ -205,7 +197,6 @@ if __name__ == "__main__":
     threading.Thread(target=dgroup_worker, daemon=True).start()
 
     updater = Updater(BOT_TOKEN, use_context=True)
-    dp = updater.dispatcher
-    dp.add_handler(CommandHandler("start", start_cmd))
+    updater.dispatcher.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("🤖 OTP Bot ONLINE ✅")))
     updater.start_polling()
     updater.idle()
