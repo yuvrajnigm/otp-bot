@@ -9,13 +9,14 @@ from flask import Flask
 from threading import Thread
 
 # --- CONFIGURATION ---
+# Telegram Configuration
 BOT_TOKEN = '8294446224:AAFi5nLurx1Mu7awo8kj3cSzmtB1XS0XBT0' 
 ADMIN_ID = 8449115253
 CHANNEL_ID = -1003406789899
 OWNER_LINK = "https://t.me/Illuminate786"
 CHANNEL_LINK = "https://t.me/YUVRAJNUMBERS"
 
-# [span_0](start_span)[span_1](start_span)[span_2](start_span)API Details from your PDFs[span_0](end_span)[span_1](end_span)[span_2](end_span)
+# [span_3](start_span)[span_4](start_span)[span_5](start_span)API Details from your PDFs[span_3](end_span)[span_4](end_span)[span_5](end_span)
 SITES = {
     "Hadi": {
         "url": "http://147.135.212.197/crapi/had/viewstats", 
@@ -66,7 +67,7 @@ COUNTRY_CODES = {
     '376': ('Andorra', '🇦🇩'), '377': ('Monaco', '🇲🇨'), '378': ('San Marino', '🇸🇲'), '380': ('Ukraine', '🇺🇦'),
     '381': ('Serbia', '🇷🇸'), '382': ('Montenegro', '🇲🇪'), '385': ('Croatia', '🇭🇷'), '386': ('Slovenia', '🇸🇮'),
     '387': ('Bosnia and Herzegovina', '🇧🇦'), '389': ('North Macedonia', '🇲🇰'), '420': ('Czech Republic', '🇨🇿'),
-    '421': ('Slovakia', ' Slovak Rep'), '423': ('Liechtenstein', '🇱🇮'), '501': ('Belize', '🇧🇿'), '502': ('Guatemala', '🇬🇹'),
+    '421': ('Slovakia', '🇸🇰'), '423': ('Liechtenstein', '🇱🇮'), '501': ('Belize', '🇧🇿'), '502': ('Guatemala', '🇬🇹'),
     '503': ('El Salvador', '🇸🇻'), '504': ('Honduras', '🇭🇳'), '505': ('Nicaragua', '🇳🇮'), '506': ('Costa Rica', '🇨🇷'),
     '507': ('Panama', '🇵🇦'), '509': ('Haiti', '🇭🇹'), '590': ('Guadeloupe', '🇬🇵'), '591': ('Bolivia', '🇧🇴'),
     '592': ('Guyana', '🇬🇾'), '593': ('Ecuador', '🇪🇨'), '595': ('Paraguay', '🇵🇾'), '597': ('Suriname', '🇸🇷'),
@@ -86,19 +87,19 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 reported_hashes = set()
 
+# Functions for detection and formatting
 def get_country_info(phone):
     for i in range(4, 0, -1):
         prefix = phone[:i]
-        if prefix in COUNTRY_CODES:
-            return COUNTRY_CODES[prefix]
+        if prefix in COUNTRY_CODES: return COUNTRY_CODES[prefix]
     return ('Unknown', '🌐')
 
 def detect_service(msg):
     msg = msg.lower()
-    services = ['whatsapp', 'google', 'facebook', 'telegram', 'instagram', 'snapchat', 'tiktok', 'apple', 'amazon', 'viber', 'imo', 'discord']
+    services = ['whatsapp', 'google', 'facebook', 'telegram', 'instagram', 'snapchat', 'tiktok', 'apple', 'amazon', 'viber', 'imo']
     for s in services:
         if s in msg: return s.upper()
-    return "SERVICE"
+    return "OTP SERVICE"
 
 def create_markup():
     builder = InlineKeyboardBuilder()
@@ -106,38 +107,37 @@ def create_markup():
     builder.row(types.InlineKeyboardButton(text="Owner 👑", url=OWNER_LINK))
     return builder.as_markup()
 
+# Admin Commands
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
     if message.from_user.id == ADMIN_ID:
-        await message.answer("<b>Welcome Admin! 👑</b>\n\nBot is active and monitoring 3 sources.\n/status - Bot Health", parse_mode="HTML")
+        await message.answer("<b>Welcome Admin! 👑</b>\nMonitoring started for 3 sites.\n/status - Check Health", parse_mode="HTML")
     else:
-        await message.answer("Hello! Join our channel for updates.")
+        await message.answer("Bot is online. Join channel for updates.")
 
+# Core Monitoring Loop
 async def fetch_updates():
     async with aiohttp.ClientSession() as session:
         while True:
             for site_name, config in SITES.items():
                 try:
-                    # [span_3](start_span)[span_4](start_span)[span_5](start_span)Request parameters: token is required[span_3](end_span)[span_4](end_span)[span_5](end_span)
-                    params = {'token': config['token'], 'records': 10} 
+                    params = {'token': config['token'], 'records': 5}
                     async with session.get(config['url'], params=params, timeout=15) as resp:
                         if resp.status == 200:
-                            res_json = await resp.json()
-                            [span_6](start_span)[span_7](start_span)[span_8](start_span)if res_json.get("status") == "success": #[span_6](end_span)[span_7](end_span)[span_8](end_span)
-                                for item in reversed(res_json.get("data", [])):
+                            data = await resp.json()
+                            if data.get("status") == "success":
+                                for item in reversed(data.get("data", [])):
                                     msg_hash = hashlib.md5(f"{item['num']}{item['message']}".encode()).hexdigest()
                                     if msg_hash not in reported_hashes:
                                         reported_hashes.add(msg_hash)
                                         
                                         country_name, flag = get_country_info(item['num'])
                                         service = detect_service(item['message'])
-                                        
-                                        # Extracting potential OTP
                                         otp_match = re.search(r'\b\d{4,8}\b', item['message'])
                                         otp = otp_match.group(0) if otp_match else "N/A"
-                                        
+
                                         text = (
-                                            f"✅ {flag} <b>{country_name} {service} OTP!</b>\n"
+                                            f"✅ {flag} <b>{country_name} {service} OTP Received!</b>\n"
                                             f"━━━━━━━━━━━━━━━━━━━━\n"
                                             f"📱 <b>Number:</b> <code>{item['num']}</code>\n"
                                             f"🌍 <b>Country:</b> {flag} {country_name}\n"
@@ -149,17 +149,15 @@ async def fetch_updates():
                                             f"━━━━━━━━━━━━━━━━━━━━\n"
                                             f"👤 <b>By:</b> <a href='{OWNER_LINK}'>Illuminate786</a>"
                                         )
-                                        
                                         await bot.send_message(CHANNEL_ID, text, parse_mode="HTML", reply_markup=create_markup(), disable_web_page_preview=True)
                 except Exception as e:
-                    print(f"Error fetching from {site_name}: {e}")
-            
-            await asyncio.sleep(20) # Check every 20 seconds
+                    print(f"Error at {site_name}: {e}")
+            await asyncio.sleep(20)
 
-# --- FLASK SERVER FOR RENDER (KEEP ALIVE) ---
+# Render Keep-Alive Server
 app = Flask('')
 @app.route('/')
-def home(): return "Bot Is Online"
+def home(): return "Bot is Online"
 def run_web(): app.run(host='0.0.0.0', port=8080)
 
 async def main():
@@ -168,7 +166,4 @@ async def main():
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        pass
+    asyncio.run(main())
