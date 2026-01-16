@@ -10,13 +10,13 @@ from flask import Flask
 from threading import Thread
 
 # --- CONFIGURATION ---
-BOT_TOKEN = '8294446224:AAHEGp3qcm7sm9iTKN3Enpf8q1GTst59qpg' 
+BOT_TOKEN = '8294446224:AAHrz1b50ow2cgI91dQwkBYDE2-9fIubabo' 
 ADMIN_ID = 8449115253
 CHANNEL_ID = -1003406789899
 OWNER_LINK = "https://t.me/Illuminate786"
 CHANNEL_LINK = "https://t.me/YUVRAJNUMBERS"
 
-# [span_0](start_span)[span_1](start_span)[span_2](start_span)API Details[span_0](end_span)[span_1](end_span)[span_2](end_span)
+# API Details from Documents
 SITES = {
     "Hadi": {
         "url": "http://147.135.212.197/crapi/had/viewstats", 
@@ -32,7 +32,7 @@ SITES = {
     }
 }
 
-# Full Country List from bot.py
+# [span_1](start_span)Country List[span_1](end_span)
 COUNTRY_CODES = {
     '1': ('USA/Canada', '🇺🇸'), '7': ('Russia/Kazakhstan', '🇷🇺'), '20': ('Egypt', '🇪🇬'), '27': ('South Africa', '🇿🇦'),
     '30': ('Greece', '🇬🇷'), '31': ('Netherlands', '🇳🇱'), '32': ('Belgium', '🇧🇪'), '33': ('France', '🇫🇷'),
@@ -89,7 +89,6 @@ reported_hashes = set()
 start_time = time.time()
 total_fetched = 0
 
-# Functions
 def get_country_info(phone):
     for i in range(4, 0, -1):
         prefix = phone[:i]
@@ -109,13 +108,13 @@ def create_markup():
     builder.row(types.InlineKeyboardButton(text="Owner 👑", url=OWNER_LINK))
     return builder.as_markup()
 
-# --- COMMANDS ---
+# Admin Commands
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
     if message.from_user.id == ADMIN_ID:
-        await message.answer("<b>Welcome Admin! 👑</b>\n\nMonitoring Hadi, D-Group, Roxy.\nUse /status for live stats.", parse_mode="HTML")
+        await message.answer("<b>Welcome Admin! 👑</b>\nMonitoring active for 3 sites.\n/status - Check Health", parse_mode="HTML")
     else:
-        await message.answer("Hello! Join our channel for OTP updates.")
+        await message.answer("Bot is online. Join channel for updates.")
 
 @dp.message(Command("status"))
 async def status_cmd(message: types.Message):
@@ -131,7 +130,7 @@ async def status_cmd(message: types.Message):
         )
         await message.answer(status_text, parse_mode="HTML")
 
-# --- MONITORING LOOP ---
+# Fetch Updates Loop
 async def fetch_updates():
     global total_fetched
     async with aiohttp.ClientSession() as session:
@@ -140,10 +139,9 @@ async def fetch_updates():
                 try:
                     params = {'token': config['token'], 'records': 5}
                     async with session.get(config['url'], params=params, timeout=15) as resp:
-                        # Sirf JSON response process karein
                         if resp.status == 200 and 'application/json' in resp.headers.get('Content-Type', ''):
                             data = await resp.json()
-                            [span_3](start_span)[span_4](start_span)[span_5](start_span)if data.get("status") == "success":[span_3](end_span)[span_4](end_span)[span_5](end_span)
+                            if data.get("status") == "success":
                                 for item in reversed(data.get("data", [])):
                                     msg_hash = hashlib.md5(f"{item['num']}{item['message']}".encode()).hexdigest()
                                     if msg_hash not in reported_hashes:
@@ -170,14 +168,13 @@ async def fetch_updates():
                                         )
                                         await bot.send_message(CHANNEL_ID, text, parse_mode="HTML", reply_markup=create_markup(), disable_web_page_preview=True)
                 except Exception as e:
-                    # Logs clean rakhne ke liye sirf basic error dikhayega
                     print(f"Fetch error at {site_name}: {e}")
             await asyncio.sleep(20)
 
-# Render Server
+# Render Keep-Alive
 app = Flask('')
 @app.route('/')
-def home(): return "Bot is Online"
+def home(): return "Bot Online"
 def run_web(): app.run(host='0.0.0.0', port=8080)
 
 async def main():
