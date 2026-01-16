@@ -24,7 +24,7 @@ SITES = {
     },
     "D-Group": {
         "url": "http://51.77.216.195/crapi/dgroup/viewstats", 
-        "token": "Q1JVQjRSQlVmU5B8Z5JzZniVk1dEgGhKVVNYalRxc2Bff2CEgoZj" 
+        "token": "Q1JVQjRSQnJqYIFDc1WUhXOWboBTdWlSg4CVemZWeEaIj5drZ3Jg" 
     },
     "Roxy": {
         "url": "http://51.77.216.195/crapi/rx/viewstats", 
