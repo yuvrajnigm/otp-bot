@@ -169,7 +169,7 @@ async def fetch_updates():
                                         await bot.send_message(CHANNEL_ID, text, parse_mode="HTML", reply_markup=create_markup(), disable_web_page_preview=True)
                 except Exception as e:
                     print(f"Fetch error at {site_name}: {e}")
-            await asyncio.sleep(20)
+            await asyncio.sleep(5)
 
 # Render Keep-Alive
 app = Flask('')
