@@ -9,7 +9,7 @@ from flask import Flask
 from threading import Thread
 
 # --- CONFIGURATION ---
-BOT_TOKEN = '8294446224:AAHEGp3qcm7sm9iTKN3Enpf8q1GTst59qpg' 
+BOT_TOKEN = '8294446224:AAFi5nLurx1Mu7awo8kj3cSzmtB1XS0XBT0' 
 ADMIN_ID = 8449115253
 CHANNEL_ID = -1003406789899
 OWNER_LINK = "https://t.me/Illuminate786"
