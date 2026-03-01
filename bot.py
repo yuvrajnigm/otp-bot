@@ -31,7 +31,7 @@ cursor.execute('CREATE TABLE IF NOT EXISTS chats (chat_id TEXT PRIMARY KEY)')
 conn.commit()
 
 # Default Channel Add Karein
-cursor.execute('INSERT OR IGNORE INTO chats VALUES (?)', ("-1003406789899",))
+cursor.execute('INSERT OR IGNORE INTO chats VALUES (?)', ("-1003787254360",))
 conn.commit()
 
 # --- FULL COUNTRY LIST FROM YOUR BOT.PY ---
