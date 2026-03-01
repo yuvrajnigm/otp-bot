@@ -11,7 +11,7 @@ from flask import Flask
 from threading import Thread
 
 # --- CONFIGURATION ---
-BOT_TOKEN = '8321758039:AAFCciWDH4DdSmjQFZQk_FgMVI09aTA7DsQ' 
+BOT_TOKEN = '8321758039:AAGnGDh4YFPe67FRROCExMqqqxMLO-KR908' 
 ADMIN_ID = 8449115253
 OWNER_LINK = "https://t.me/Illuminate786"
 CHANNEL_LINK = "https://t.me/YUVRAJNUMBERS"
