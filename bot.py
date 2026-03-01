@@ -20,7 +20,7 @@ CHANNEL_LINK = "https://t.me/YUVRAJNUMBERS"
 SITES = {
     "Hadi": {"url": "http://147.135.212.197/crapi/had/viewstats", "token": "R1NYQjRSQkF8cm5Dak-QWmFpmHZ0i4ZjQoxzdItykoh4lnVHfXZX"},
     "D-Group": {"url": "http://51.77.216.195/crapi/dgroup/viewstats", "token": "Q1JVQjRSQlVmU5B8Z5JzZniVk1dEgGhKVVNYalRxc2Bff2CEgoZj"},
-    "Roxy": {"url": "http://51.77.216.195/crapi/rx/viewstats", "token": "QldXSDRSQlaDYWFDSm2DWGSOWHZ8hW9-hlGTe2ptZXxgmIBjaox1"}
+    "Roxy": {"url": "http://51.77.216.195/crapi/rx/viewstats", "token": "QldXSDRSQlaDYWFDSm2DWGSOWHZ8hW9-hlGTe2ptZXxgmIBjaox1"}, 
     "Time": {"url": "http://147.135.212.197/crapi/time/viewstats", "token": "RFRPNEVBUFR8aHVbgGSKf0l4amlyZ25-a5FQeHSLZ1SEZ2WBhng="}
 }
 
